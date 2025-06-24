@@ -44,6 +44,43 @@ func TestDecode(t *testing.T) {
 	}
 }
 
+func TestDecodePattern(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+	}{
+		{"foobar", "A0B1C2D3E4F5G6H7"},
+		{"special", "\u0004\u0004\u0004\u0004"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			length := (16 / len(tc.pattern)) + 1
+			raw := bytes.Repeat([]byte(tc.pattern), length)
+
+			encoded := bytes.NewBuffer(nil)
+			enc, err := NewEncoder(encoded, Meta{
+				Raw: true,
+			})
+			io.Copy(enc, bytes.NewReader(raw))
+
+			require.NoError(t, err)
+
+			dst := make([]byte, len(encoded.Bytes()))
+
+			dec := NewDecoder(encoded)
+			_, produced, _ := dec.decodeYenc(dst, encoded.Bytes())
+			println(string(dst[:produced]))
+			//b := bytes.NewBuffer(nil)
+			//n, err := io.Copy(b, dec)
+			//require.Equal(t, int64(len(raw)), n)
+			//require.NoError(t, err)
+			require.Equal(t, raw, dst[:produced])
+			//require.Equal(t, int64(len(raw)), dec.Meta.End())
+		})
+	}
+}
+
 func TestDecodeUU(t *testing.T) {
 	cases := []struct {
 		name string
