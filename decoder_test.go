@@ -3,10 +3,11 @@ package rapidyenc
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
 	"fmt"
 	"github.com/stretchr/testify/require"
+	"hash/crc32"
 	"io"
+	"math/rand/v2"
 	"testing"
 )
 
@@ -16,11 +17,10 @@ func TestDecode(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
-		crc  uint32
 	}{
-		{"foobar", "foobar", 0x9EF61F95},
-		{"0x20", string(space), 0x31f365e7},
-		{"special", "\x04\x04\x04\x04", 0xca2ee18a},
+		{"foobar", "foobar"},
+		{"0x20", string(space)},
+		{"special", "\x04\x04\x04\x04"},
 	}
 
 	for _, tc := range cases {
@@ -33,10 +33,10 @@ func TestDecode(t *testing.T) {
 			dec := AcquireDecoder(encoded)
 			b := bytes.NewBuffer(nil)
 			n, err := io.Copy(b, dec)
-			require.Equal(t, int64(len(raw)), n)
 			require.NoError(t, err)
+			require.Equal(t, int64(len(raw)), n)
 			require.Equal(t, raw, b.Bytes())
-			require.Equal(t, tc.crc, dec.Meta.Hash)
+			require.Equal(t, crc32.Checksum(raw, crc32.IEEETable), dec.Meta.Hash)
 			require.Equal(t, int64(len(raw)), dec.Meta.End())
 			ReleaseDecoder(dec)
 		})
@@ -104,7 +104,7 @@ func TestSplitReads(t *testing.T) {
 
 func BenchmarkDecoder(b *testing.B) {
 	raw := make([]byte, 1024*1024)
-	_, err := rand.Read(raw)
+	_, err := rand.NewChaCha8([32]byte(bytes.Repeat([]byte{0xBA, 0xAD, 0xF0, 0x0D}, 8))).Read(raw)
 	require.NoError(b, err)
 
 	r, err := body(raw)
@@ -114,7 +114,8 @@ func BenchmarkDecoder(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		_, err = io.Copy(io.Discard, dec)
+		n, err := io.Copy(io.Discard, dec)
+		require.Equal(b, int64(len(raw)), n)
 		require.NoError(b, err)
 		_, err = r.Seek(0, io.SeekStart)
 		require.NoError(b, err)

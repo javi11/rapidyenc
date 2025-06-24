@@ -9,6 +9,8 @@ type Meta struct {
 	TotalParts int64
 	Offset     int64 // Offset of the part within the file relative to the start, like io.Seeker or io.WriterAt
 	PartSize   int64 // Size of the unencoded data
+
+	Raw bool
 }
 
 // Begin is the "=ypart begin" value calculated from the Offset
@@ -36,6 +38,9 @@ var (
 )
 
 func (m Meta) validate() error {
+	if m.Raw {
+		return nil
+	}
 	if len(m.FileName) == 0 {
 		return errFileNameEmpty
 	}
