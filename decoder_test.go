@@ -3,11 +3,12 @@ package rapidyenc
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"io"
+	"math/rand/v2"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestDecode(t *testing.T) {
@@ -104,7 +105,7 @@ func TestSplitReads(t *testing.T) {
 
 func BenchmarkDecoder(b *testing.B) {
 	raw := make([]byte, 1024*1024)
-	_, err := rand.Read(raw)
+	_, err := rand.NewChaCha8([32]byte(bytes.Repeat([]byte{0xBA, 0xAD, 0xF0, 0x0D}, 8))).Read(raw)
 	require.NoError(b, err)
 
 	r, err := body(raw)
@@ -202,5 +203,42 @@ func TestExtractCRC(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.expected, i)
 		})
+	}
+}
+
+func TestPipeline(t *testing.T) {
+	raw := make([]byte, 1024*1024)
+	_, err := rand.NewChaCha8([32]byte(bytes.Repeat([]byte{0xBA, 0xAD, 0xF0, 0x0D}, 8))).Read(raw)
+	require.NoError(t, err)
+
+	w := new(bytes.Buffer)
+
+	articles := 2
+
+	r, err := body(raw)
+	require.NoError(t, err)
+
+	for i := range articles {
+		_, err = r.Seek(0, io.SeekStart)
+		require.NoError(t, err)
+
+		w.WriteString(fmt.Sprintf("222 0 <%d>\r\n", i))
+		io.Copy(w, r)
+		w.Write([]byte(".\r\n"))
+	}
+
+	dec := AcquireDecoder(w)
+	defer ReleaseDecoder(dec)
+
+	for range articles {
+		dec.ResetState()
+
+		answer, _, err := dec.ReadLine()
+		require.NoError(t, err)
+		require.Equal(t, answer[:3], []byte("222"))
+
+		n, err := io.Copy(io.Discard, dec)
+		require.Equal(t, int64(len(raw)), n)
+		require.NoError(t, err)
 	}
 }

@@ -17,18 +17,20 @@ RapidYencDecoderEnd rapidyenc_decode_incremental_go(const void* src, void* dest,
 */
 import "C"
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"golang.org/x/text/transform"
 	"hash"
 	"hash/crc32"
 	"io"
 	"strconv"
 	"sync"
 	"unsafe"
+
+	"golang.org/x/text/transform"
 )
 
 var (
@@ -165,6 +167,135 @@ func (d *Decoder) Read(p []byte) (n int, err error) {
 	}
 }
 
+// Buffered returns the number of bytes that can be read from the current buffer.
+func (d *Decoder) Buffered() int { return d.src1 - d.src0 }
+
+func (d *Decoder) readErr() error {
+	err := d.err
+	d.err = nil
+	return err
+}
+
+const maxConsecutiveEmptyReads = 100
+
+var errNegativeRead = errors.New("bufio: reader returned negative count from Read")
+
+// fill reads a new chunk into the buffer.
+func (d *Decoder) fill() {
+	// Slide existing data to beginning.
+	if d.src0 != d.src1 {
+		copy(d.src, d.src[d.src0:d.src1])
+		d.src1 -= d.src0
+		d.src0 = 0
+	}
+
+	if d.src1 >= len(d.src) {
+		panic("bufio: tried to fill full buffer")
+	}
+
+	// Read new data: try a limited number of times.
+	for i := maxConsecutiveEmptyReads; i > 0; i-- {
+		n, err := d.r.Read(d.src[d.src1:])
+		if n < 0 {
+			panic(errNegativeRead)
+		}
+		d.src1 += n
+		if err != nil {
+			d.err = err
+			return
+		}
+		if n > 0 {
+			return
+		}
+	}
+	d.err = io.ErrNoProgress
+}
+
+// ReadSlice reads until the first occurrence of delim in the input,
+// returning a slice pointing at the bytes in the buffer.
+// The bytes stop being valid at the next read.
+// If ReadSlice encounters an error before finding a delimiter,
+// it returns all the data in the buffer and the error itself (often io.EOF).
+// ReadSlice fails with error [ErrBufferFull] if the buffer fills without a delim.
+// Because the data returned from ReadSlice will be overwritten
+// by the next I/O operation, most clients should use
+// [Reader.ReadBytes] or ReadString instead.
+// ReadSlice returns err != nil if and only if line does not end in delim.
+func (d *Decoder) ReadSlice(delim byte) (line []byte, err error) {
+	s := 0 // search start index
+	for {
+		// Search buffer.
+		if i := bytes.IndexByte(d.src[d.src0+s:d.src1], delim); i >= 0 {
+			i += s
+			line = d.src[d.src0 : d.src0+i+1]
+			d.src0 += i + 1
+			break
+		}
+
+		// Pending error?
+		if d.err != nil {
+			line = d.src[d.src0:d.src1]
+			d.src0 = d.src1
+			err = d.readErr()
+			break
+		}
+
+		// Buffer full?
+		if d.Buffered() >= len(d.src) {
+			d.src0 = d.src1
+			line = d.src
+			err = bufio.ErrBufferFull
+			break
+		}
+
+		s = d.src1 - d.src0 // do not rescan area we scanned before
+
+		d.fill() // buffer is not full
+	}
+
+	if d.src0 > 0 && d.src0 == d.src1 {
+		d.src0 = 0
+		d.src1 = 0
+	}
+
+	return
+}
+
+func (d *Decoder) ReadLine() (line []byte, isPrefix bool, err error) {
+	line, err = d.ReadSlice('\n')
+	if err == bufio.ErrBufferFull {
+		// Handle the case where "\r\n" straddles the buffer.
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			// Put the '\r' back on buf and drop it from line.
+			// Let the next call to ReadLine check for "\r\n".
+			if d.src0 == 0 {
+				// should be unreachable
+				panic("bufio: tried to rewind past start of buffer")
+			}
+			d.src0--
+			line = line[:len(line)-1]
+		}
+		return line, true, nil
+	}
+
+	if len(line) == 0 {
+		if err != nil {
+			line = nil
+		}
+		return
+	}
+	err = nil
+
+	if line[len(line)-1] == '\n' {
+		drop := 1
+		if len(line) > 1 && line[len(line)-2] == '\r' {
+			drop = 2
+		}
+		line = line[:len(line)-drop]
+	}
+	return
+}
+
 // Transform starts by reading line-by-line to parse yEnc headers until it encounters yEnc data.
 // It then incrementally decodes chunks of yEnc encoded data before returning to line-by-line processing
 // for the footer and EOF pattern (.\r\n)
@@ -248,9 +379,18 @@ transform:
 	}
 }
 
+// Reset discards any buffered data, resets all state, and switches
+// the buffered reader to read from r.
 func (d *Decoder) Reset(r io.Reader) {
 	d.r = r
 	d.src0, d.src1 = 0, 0
+
+	d.ResetState()
+}
+
+// ResetState resets all state, and switches the buffered reader to read from r.
+// The buffered data from r is kept.
+func (d *Decoder) ResetState() {
 	d.dst0, d.dst1 = 0, 0
 
 	d.body = false
