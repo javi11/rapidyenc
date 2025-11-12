@@ -30,33 +30,6 @@ import (
 	"unsafe"
 )
 
-var (
-	decoderPool sync.Pool
-)
-
-// AcquireDecoder returns an empty Decoder instance from Decoder pool.
-//
-// The returned Decoder instance may be passed to ReleaseDecoder when it is
-// no longer needed. This allows Decoder recycling, reduces GC pressure
-// and usually improves performance.
-func AcquireDecoder(r io.Reader) *Decoder {
-	if v := decoderPool.Get(); v != nil {
-		dec := v.(*Decoder)
-		dec.Reset(r)
-		return dec
-	}
-	return NewDecoder(r)
-}
-
-// ReleaseDecoder returns dec acquired via AcquireDecoder to Decoder pool.
-//
-// It is forbidden accessing dec and/or its members after returning
-// it to Decoder pool.
-func ReleaseDecoder(dec *Decoder) {
-	dec.Reset(nil)
-	decoderPool.Put(dec)
-}
-
 type Decoder struct {
 	r    io.Reader
 	Meta DecodedMeta
@@ -224,26 +197,6 @@ func (d *Decoder) decodeYenc(dst, src []byte) (int, int, error) {
 	}
 
 	return nd, ns, nil
-}
-
-func (d *Decoder) Reset(r io.Reader) {
-	d.r = r
-	d.remainder = nil
-
-	d.body = false
-	d.begin = false
-	d.part = false
-	d.end = false
-	d.crc = false
-
-	d.State = StateCRLF
-	d.format = FormatUnknown
-	d.actualSize = 0
-	d.expectedCrc = 0
-	d.hash.Reset()
-	d.Meta = DecodedMeta{}
-
-	d.err = nil
 }
 
 func (d *Decoder) processYenc(line []byte) {

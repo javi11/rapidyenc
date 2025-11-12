@@ -5,9 +5,10 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestDecode(t *testing.T) {
@@ -30,7 +31,7 @@ func TestDecode(t *testing.T) {
 			encoded, err := body(raw)
 			require.NoError(t, err)
 
-			dec := AcquireDecoder(encoded)
+			dec := NewDecoder(encoded)
 			b := bytes.NewBuffer(nil)
 			n, err := io.Copy(b, dec)
 			require.Equal(t, int64(len(raw)), n)
@@ -38,7 +39,6 @@ func TestDecode(t *testing.T) {
 			require.Equal(t, raw, b.Bytes())
 			require.Equal(t, tc.crc, dec.Meta.Hash)
 			require.Equal(t, int64(len(raw)), dec.Meta.End())
-			ReleaseDecoder(dec)
 		})
 	}
 }
@@ -90,14 +90,13 @@ func TestSplitReads(t *testing.T) {
 				}
 			}()
 
-			dec := AcquireDecoder(r)
+			dec := NewDecoder(r)
 			b := bytes.NewBuffer(nil)
 			n, err := io.Copy(b, dec)
 			require.Equal(t, int64(len(raw)), n)
 			require.NoError(t, err)
 			require.Equal(t, raw, b.Bytes())
 			require.Equal(t, int64(len(raw)), dec.Meta.End())
-			ReleaseDecoder(dec)
 		})
 	}
 }
@@ -110,18 +109,14 @@ func BenchmarkDecoder(b *testing.B) {
 	r, err := body(raw)
 	require.NoError(b, err)
 
-	dec := AcquireDecoder(r)
-
 	b.ResetTimer()
 	for b.Loop() {
+		dec := NewDecoder(r)
 		_, err = io.Copy(io.Discard, dec)
 		require.NoError(b, err)
 		_, err = r.Seek(0, io.SeekStart)
 		require.NoError(b, err)
-		dec.Reset(r)
 	}
-
-	ReleaseDecoder(dec)
 }
 
 func body(raw []byte) (io.ReadSeeker, error) {
