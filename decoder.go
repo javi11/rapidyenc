@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"golang.org/x/text/transform"
 	"hash"
 	"hash/crc32"
 	"io"
@@ -58,8 +57,6 @@ func ReleaseDecoder(dec *Decoder) {
 	decoderPool.Put(dec)
 }
 
-// Meta is the result of parsing the yEnc headers (ybegin, ypart, yend)
-
 type Decoder struct {
 	r    io.Reader
 	Meta DecodedMeta
@@ -78,28 +75,13 @@ type Decoder struct {
 
 	err error
 
-	// dst[dst0:dst1] contains bytes that have been transformed by Transform but
-	// not yet copied out via Read.
-	dst        []byte
-	dst0, dst1 int
-
-	// src[src0:src1] contains bytes that have been read from r but not
-	// yet transformed through Transform.
-	src        []byte
-	src0, src1 int
-
-	// transformComplete is whether the transformation is complete,
-	// regardless of whether it was successful.
-	transformComplete bool
+	// remainder contains bytes that have been read from r but were not sufficient to copy out via Read
+	remainder []byte
 }
-
-const defaultBufSize = 4096
 
 func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{
 		r:    r,
-		dst:  make([]byte, defaultBufSize),
-		src:  make([]byte, defaultBufSize),
 		hash: crc32.NewIEEE(),
 	}
 }
@@ -110,148 +92,143 @@ var (
 	ErrCrcMismatch    = errors.New("crc32 mismatch")
 )
 
-func (d *Decoder) Read(p []byte) (n int, err error) {
-	for {
-		// Copy out any transformed bytes and return the final error if we are done.
-		if d.dst0 != d.dst1 {
-			n = copy(p, d.dst[d.dst0:d.dst1])
-			d.dst0 += n
-			if d.dst0 == d.dst1 && d.transformComplete {
-				return n, d.err
-			}
-			return n, nil
-		} else if d.transformComplete {
-			return 0, d.err
-		}
-
-		// Try to transform some source bytes, or to flush the transformer if we
-		// are out of source bytes. We do this even if d.d.Read returned an error.
-		// As the io.Reader documentation says, "process the n > 0 bytes returned
-		// before considering the error".
-		if d.src0 != d.src1 || d.err != nil {
-			d.dst0 = 0
-			d.dst1, n, err = d.Transform(d.dst, d.src[d.src0:d.src1], d.err == io.EOF)
-			d.src0 += n
-
-			switch {
-			case err == nil:
-				// The Transform call was successful; we are complete if we
-				// cannot read more bytes into src.
-				d.transformComplete = d.err != nil
-				continue
-			case errors.Is(err, transform.ErrShortDst) && (d.dst1 != 0 || n != 0):
-				// Make room in dst by copying out, and try again.
-				continue
-			case errors.Is(err, transform.ErrShortSrc) && d.src1-d.src0 != len(d.src) && d.err == nil:
-				// Read more bytes into src via the code below, and try again.
-			default:
-				d.transformComplete = true
-				// The reader error (d.err) takes precedence over the
-				// transformer error (err) unless d.err is nil or io.EOF.
-				if d.err == nil || d.err == io.EOF {
-					d.err = err
-				}
-				continue
-			}
-		}
-
-		// Move any untransformed source bytes to the start of the buffer
-		// and read more bytes.
-		if d.src0 != 0 {
-			d.src0, d.src1 = 0, copy(d.src, d.src[d.src0:d.src1])
-		}
-		n, d.err = d.r.Read(d.src[d.src1:])
-		d.src1 += n
+func (d *Decoder) Read(p []byte) (int, error) {
+	if d.err != nil {
+		return 0, d.metaError()
 	}
-}
 
-// Transform starts by reading line-by-line to parse yEnc headers until it encounters yEnc data.
-// It then incrementally decodes chunks of yEnc encoded data before returning to line-by-line processing
-// for the footer and EOF pattern (.\r\n)
-func (d *Decoder) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
-transform:
+	// Restore previously read data
+	if len(p) < len(d.remainder) {
+		return 0, fmt.Errorf("[rapidyenc] remainder larger than reader: %d < %d", len(p), len(d.remainder))
+	}
+	nremainder := copy(p, d.remainder)
+	d.remainder = d.remainder[nremainder:]
+
+	// Use p as scratch space
+	var n int
+	n, d.err = d.r.Read(p[nremainder:])
+	p = p[:n+nremainder]
+	dst := p
+
+	var decoded int
 	if d.body && d.format == FormatYenc {
-		nd, ns, end, _ := DecodeIncremental(dst[nDst:], src[nSrc:], &d.State)
-		if nd > 0 {
-			d.hash.Write(dst[nDst : nDst+nd])
-			d.actualSize += int64(nd)
-			nDst += nd
+		nd, ns, err := d.decodeYenc(dst, p)
+		if err != nil {
+			return nd, err
 		}
-
-		switch end {
-		case EndControl:
-			nSrc += ns - 2
-			d.body = false
-		case EndArticle:
-			nSrc += ns - 3
-			d.body = false
-		default:
-			if d.State == StateCRLFEQ {
-				d.State = StateCRLF
-				nSrc += ns - 1
-			} else {
-				nSrc += ns
-			}
-			return nDst, nSrc, transform.ErrShortSrc
-		}
+		p = p[ns:]
+		dst = dst[nd:]
+		decoded += nd
 	}
 
 	// Line by line processing
-	for {
-		// Article EOF
-		if bytes.HasPrefix(src[nSrc:], []byte(".\r\n")) {
-			atEOF = true
-			nSrc += 3
-			break
-		}
+	if !d.body {
+		for {
+			line, after, found := bytes.Cut(p, []byte("\r\n"))
+			if !found {
+				break
+			}
+			p = after
 
-		endOfLine := bytes.Index(src[nSrc:], []byte("\r\n"))
-		if endOfLine == -1 {
-			break
-		}
+			if bytes.Equal(line, []byte(".")) {
+				d.err = io.EOF
+				break
+			}
 
-		line := src[nSrc : nSrc+endOfLine+2]
-		nSrc += endOfLine + 2
+			if d.format == FormatUnknown {
+				d.format = detectFormat(line)
+			}
 
-		if d.format == FormatUnknown {
-			d.format = detectFormat(line)
-		}
-
-		switch d.format {
-		case FormatYenc:
-			d.processYenc(line)
-			goto transform
-		case FormatUU:
-			// TODO: does not uudecode, for now just copies encoded data
-			nDst += copy(dst[nDst:], line)
+			if d.format == FormatYenc {
+				d.processYenc(line)
+				if d.body {
+					nd, ns, err := d.decodeYenc(dst, p)
+					p = p[ns:]
+					dst = dst[nd:]
+					decoded += nd
+					if err != nil {
+						return decoded, err
+					}
+					if d.body {
+						break
+					}
+				}
+			} else if d.format == FormatUU {
+				// TODO: does not uudecode, for now just copies encoded data
+				copy(dst, line)
+				copy(dst[len(line):], "\r\n")
+				nd := len(line) + 2
+				dst = dst[nd:]
+				decoded += nd
+			}
 		}
 	}
 
-	if atEOF {
-		d.Meta.Hash = d.hash.Sum32()
-		if d.format == FormatUU {
-			return nDst, nSrc, fmt.Errorf("[rapidyenc] uuencode not implemented")
-		} else if !d.begin {
-			err = fmt.Errorf("[rapidyenc] end of article without finding \"=begin\" header: %w", ErrDataMissing)
-		} else if !d.end {
-			err = fmt.Errorf("[rapidyenc] end of article without finding \"=yend\" trailer: %w", ErrDataCorruption)
-		} else if (!d.part && d.Meta.FileSize != d.actualSize) || (d.part && d.Meta.PartSize != d.actualSize) {
-			err = fmt.Errorf("[rapidyenc] expected size %d but got %d: %w", d.Meta.PartSize, d.actualSize, ErrDataCorruption)
-		} else if d.crc && d.expectedCrc != d.Meta.Hash {
-			err = fmt.Errorf("[rapidyenc] expected decoded data to have CRC32 hash %#08x but got %#08x: %w", d.expectedCrc, d.Meta.Hash, ErrCrcMismatch)
-		} else {
-			err = io.EOF
-		}
-		return nDst, nSrc, err
-	} else {
-		return nDst, nSrc, transform.ErrShortSrc
+	// Save remainder; small amount of data that doesn't have \r\n
+	d.remainder = append(d.remainder, p...)
+
+	if d.err == io.EOF {
+		return decoded, d.metaError()
 	}
+
+	return decoded, nil
+}
+
+func (d *Decoder) metaError() error {
+	if len(d.remainder) > 0 {
+		return io.ErrUnexpectedEOF
+	}
+	if d.format == FormatUU {
+		return fmt.Errorf("[rapidyenc] uuencode not implemented")
+	}
+	if !d.begin {
+		return fmt.Errorf("[rapidyenc] end of article without finding \"=begin\" header: %w", ErrDataMissing)
+	}
+	if !d.end {
+		return fmt.Errorf("[rapidyenc] end of article without finding \"=yend\" trailer: %w", ErrDataCorruption)
+	}
+	if (!d.part && d.Meta.FileSize != d.actualSize) || (d.part && d.Meta.PartSize != d.actualSize) {
+		return fmt.Errorf("[rapidyenc] expected size %d but got %d: %w", d.Meta.PartSize, d.actualSize, ErrDataCorruption)
+	}
+	if d.crc && d.expectedCrc != d.Meta.Hash {
+		return fmt.Errorf("[rapidyenc] expected decoded data to have CRC32 hash %#08x but got %#08x: %w", d.expectedCrc, d.Meta.Hash, ErrCrcMismatch)
+	}
+	return io.EOF
+}
+
+func (d *Decoder) decodeYenc(dst, src []byte) (int, int, error) {
+	nd, ns, end, err := DecodeIncremental(dst, src, &d.State)
+	if err != nil {
+		return 0, 0, fmt.Errorf("[rapidyenc] failed to decode incremental data: %w", err)
+	}
+
+	if _, err := d.hash.Write(dst[:nd]); err != nil {
+		return 0, 0, fmt.Errorf("[rapidyenc] failed to hash data: %w", err)
+	}
+	d.actualSize += int64(nd)
+
+	if end == EndControl {
+		d.body = false
+		return nd, ns - 2, nil
+	}
+
+	if end == EndArticle {
+		d.body = false
+		return nd, ns - 3, io.EOF
+	}
+
+	if d.State == StateCRLFEQ {
+		// Special case: found "\r\n=" but no more data - might be start of =yend
+		d.State = StateCRLF
+		return nd, ns - 1, nil
+	}
+
+	return nd, ns, nil
 }
 
 func (d *Decoder) Reset(r io.Reader) {
 	d.r = r
-	d.src0, d.src1 = 0, 0
-	d.dst0, d.dst1 = 0, 0
+	d.remainder = nil
 
 	d.body = false
 	d.begin = false
@@ -267,7 +244,6 @@ func (d *Decoder) Reset(r io.Reader) {
 	d.Meta = DecodedMeta{}
 
 	d.err = nil
-	d.transformComplete = false
 }
 
 func (d *Decoder) processYenc(line []byte) {
@@ -303,6 +279,7 @@ func (d *Decoder) processYenc(line []byte) {
 			d.crc = true
 		}
 		d.Meta.PartSize, _ = extractInt(line, []byte(" size="))
+		d.Meta.Hash = d.hash.Sum32()
 	}
 }
 

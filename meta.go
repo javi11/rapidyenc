@@ -2,6 +2,7 @@ package rapidyenc
 
 import "errors"
 
+// Meta is the result of parsing the yEnc headers (ybegin, ypart, yend)
 type Meta struct {
 	FileName   string
 	FileSize   int64 // Total size of the file
