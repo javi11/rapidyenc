@@ -31,7 +31,7 @@ var (
 	errFileNameEmpty = errors.New("file name is empty")
 	errFileSize      = errors.New("file size is less than or equal to zero")
 	errPartNumber    = errors.New("part number is less than or equal to zero")
-	errTotalParts    = errors.New("total tarts is less than part number")
+	errTotalParts    = errors.New("total parts is less than part number")
 	errOffset        = errors.New("offset is less than zero")
 	errPartSize      = errors.New("part size is less than or equal to zero")
 )

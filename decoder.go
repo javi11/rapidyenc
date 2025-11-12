@@ -155,7 +155,7 @@ func (d *Decoder) metaError() error {
 		return fmt.Errorf("[rapidyenc] uuencode not implemented")
 	}
 	if !d.begin {
-		return fmt.Errorf("[rapidyenc] end of article without finding \"=begin\" header: %w", ErrDataMissing)
+		return fmt.Errorf("[rapidyenc] end of article without finding \"=ybegin\" header: %w", ErrDataMissing)
 	}
 	if !d.end {
 		return fmt.Errorf("[rapidyenc] end of article without finding \"=yend\" trailer: %w", ErrDataCorruption)
