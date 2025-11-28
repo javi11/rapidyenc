@@ -7,12 +7,13 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"hash"
 	"hash/crc32"
 	"io"
 	"sync"
 	"unsafe"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type Encoder struct {
@@ -100,8 +101,10 @@ func (e *Encoder) Write(p []byte) (n int, err error) {
 		}
 	}()
 
-	if _, err := e.writeHeader(); err != nil {
-		return 0, err
+	if !e.m.Raw {
+		if _, err := e.writeHeader(); err != nil {
+			return 0, err
+		}
 	}
 
 	// Previous Write ended with a space or tab, so we need to include it (without escaping)
@@ -170,15 +173,17 @@ func (e *Encoder) Close() error {
 		}
 	}
 
-	if _, err := fmt.Fprintf(e.w, "\r\n=yend size=%d part=%d pcrc32=%08x\r\n", e.m.PartSize, e.m.PartNumber, e.hash.Sum32()); err != nil {
-		return err
-	}
+	if !e.m.Raw {
+		if _, err := fmt.Fprintf(e.w, "\r\n=yend size=%d part=%d pcrc32=%08x\r\n", e.m.PartSize, e.m.PartNumber, e.hash.Sum32()); err != nil {
+			return err
+		}
 
-	if e.processed != e.m.PartSize {
-		return fmt.Errorf(
-			"[rapidyenc] encode header has part size %d but actually encoded %d bytes",
-			e.m.PartSize, e.processed,
-		)
+		if e.processed != e.m.PartSize {
+			return fmt.Errorf(
+				"[rapidyenc] encode header has part size %d but actually encoded %d bytes",
+				e.m.PartSize, e.processed,
+			)
+		}
 	}
 
 	return nil
