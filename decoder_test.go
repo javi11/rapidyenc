@@ -55,7 +55,7 @@ func TestDecodePattern(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			length := (16 / len(tc.pattern)) + 1
+			length := (1024 / len(tc.pattern)) + 1
 			raw := bytes.Repeat([]byte(tc.pattern), length)
 
 			encoded := bytes.NewBuffer(nil)
@@ -69,7 +69,7 @@ func TestDecodePattern(t *testing.T) {
 			dst := make([]byte, len(encoded.Bytes()))
 
 			dec := NewDecoder(encoded)
-			_, produced, _ := dec.decodeYenc(dst, encoded.Bytes())
+			produced, _, _ := dec.decodeYenc(dst, encoded.Bytes())
 			println(string(dst[:produced]))
 			//b := bytes.NewBuffer(nil)
 			//n, err := io.Copy(b, dec)

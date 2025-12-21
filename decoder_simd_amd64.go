@@ -390,6 +390,5 @@ func decodeIncremental(dst, src []byte, state *State) (int, []byte, End, error) 
 	}
 
 	maybeInitLUT()
-	return decodeGeneric(dst, src, state)
-	//return decodeAVX2(dst, src, state)
+	return decodeAVX2(dst, src, state)
 }
