@@ -3,10 +3,11 @@ package rapidyenc
 import (
 	"bytes"
 	"crypto/rand"
-	"github.com/stretchr/testify/require"
 	"hash/crc32"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type encoderCase struct {
@@ -41,6 +42,7 @@ func TestEncoderSimple(t *testing.T) {
 			require.NoError(t, err)
 			err = w.Close()
 			require.NoError(t, err)
+			encoded.Write([]byte(".\r\n"))
 
 			// Check contains the expected encoded value
 			expected := append([]byte("\r\n"), append(tc.expected, []byte("\r\n")[:]...)...)
@@ -48,13 +50,13 @@ func TestEncoderSimple(t *testing.T) {
 
 			// Check that we can decode it back again
 			decoded := new(bytes.Buffer)
-			r := NewDecoder(encoded)
-			_, err = io.Copy(decoded, r)
+			dec := NewDecoder(encoded, WithStatusLineAlreadyRead())
+			r, err := dec.Next(decoded)
 			require.NoError(t, err)
 			require.Equal(t, tc.input, decoded.Bytes())
-			require.Equal(t, int64(len(tc.input)), r.Meta.PartSize)
-			require.Equal(t, crc32.ChecksumIEEE(tc.input), r.Meta.Hash)
-			require.Equal(t, int64(len(tc.input)), r.Meta.End())
+			require.Equal(t, int64(len(tc.input)), r.PartSize)
+			require.Equal(t, crc32.ChecksumIEEE(tc.input), r.CRC)
+			require.Equal(t, int64(len(tc.input)), r.End())
 		})
 	}
 }

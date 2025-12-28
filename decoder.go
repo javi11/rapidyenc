@@ -17,45 +17,47 @@ RapidYencDecoderEnd rapidyenc_decode_incremental_go(const void* src, void* dest,
 */
 import "C"
 import (
-	"bytes"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
-	"fmt"
-	"hash"
-	"hash/crc32"
 	"io"
-	"strconv"
 	"sync"
 	"unsafe"
 )
 
 type Decoder struct {
-	r    io.Reader
-	Meta DecodedMeta
-
-	body  bool
-	begin bool
-	part  bool
-	end   bool
-	crc   bool
-
-	State       State
-	format      Format
-	actualSize  int64
-	expectedCrc uint32
-	hash        hash.Hash32
-
-	err error
-
-	// remainder contains bytes that have been read from r but were not sufficient to copy out via Read
-	remainder []byte
+	r                  io.Reader
+	rb                 readBuffer
+	statusLineConsumed bool // Has the caller already consumed the status line; if so trust that it is a multiline response
 }
 
-func NewDecoder(r io.Reader) *Decoder {
+type decoderOptions struct {
+	statusLineAlreadyRead bool
+	readBufferSize        int
+}
+
+type DecoderOption func(*decoderOptions)
+
+func NewDecoder(r io.Reader, opts ...DecoderOption) *Decoder {
+	o := decoderOptions{readBufferSize: defaultReadBufSize}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	return &Decoder{
-		r:    r,
-		hash: crc32.NewIEEE(),
+		r:                  r,
+		rb:                 readBuffer{buf: make([]byte, o.readBufferSize)},
+		statusLineConsumed: o.statusLineAlreadyRead,
+	}
+}
+
+func WithStatusLineAlreadyRead() DecoderOption {
+	return func(o *decoderOptions) {
+		o.statusLineAlreadyRead = true
+	}
+}
+
+func WithBufferSize(size int) DecoderOption {
+	return func(o *decoderOptions) {
+		o.readBufferSize = size
 	}
 }
 
@@ -66,208 +68,26 @@ var (
 	ErrUU             = errors.New("data is uuencoded")
 )
 
-func (d *Decoder) Read(p []byte) (int, error) {
-	if d.err != nil {
-		return 0, d.metaError()
-	}
-
-	// Restore previously read data
-	if len(p) < len(d.remainder) {
-		return 0, fmt.Errorf("[rapidyenc] remainder larger than reader: %d < %d", len(p), len(d.remainder))
-	}
-	nremainder := copy(p, d.remainder)
-	d.remainder = d.remainder[nremainder:]
-
-	// Use p as scratch space
-	var n int
-	n, d.err = d.r.Read(p[nremainder:])
-	p = p[:n+nremainder]
-	dst := p
-
-	var decoded int
-	if d.body && d.format == FormatYenc {
-		nd, ns, err := d.decodeYenc(dst, p)
-		if err != nil {
-			return nd, err
-		}
-		p = p[ns:]
-		dst = dst[nd:]
-		decoded += nd
-	}
-
-	// Line by line processing
-	if !d.body {
-		for {
-			line, after, found := bytes.Cut(p, []byte("\r\n"))
-			if !found {
-				break
-			}
-			p = after
-
-			if bytes.Equal(line, []byte(".")) {
-				d.err = io.EOF
-				break
-			}
-
-			if d.format == FormatUnknown {
-				d.format = detectFormat(line)
-			}
-
-			if d.format == FormatYenc {
-				d.processYenc(line)
-				if d.body {
-					nd, ns, err := d.decodeYenc(dst, p)
-					p = p[ns:]
-					dst = dst[nd:]
-					decoded += nd
-					if err != nil {
-						return decoded, err
-					}
-					if d.body {
-						break
-					}
-				}
-			} else if d.format == FormatUU {
-				// TODO: does not uudecode, for now just copies encoded data
-				copy(dst, line)
-				copy(dst[len(line):], "\r\n")
-				nd := len(line) + 2
-				dst = dst[nd:]
-				decoded += nd
-			}
-		}
-	}
-
-	// Save remainder; small amount of data that doesn't have \r\n
-	d.remainder = append(d.remainder, p...)
-
-	if d.err == io.EOF {
-		return decoded, d.metaError()
-	}
-
-	return decoded, nil
+type streamFeeder interface {
+	Feed(in []byte, out io.Writer) (consumed int, done bool, err error)
 }
 
-func (d *Decoder) metaError() error {
-	if len(d.remainder) > 0 {
-		return io.ErrUnexpectedEOF
-	}
-	if d.format == FormatUU {
-		return ErrUU
-	}
-	if !d.begin {
-		return fmt.Errorf("[rapidyenc] end of article without finding \"=ybegin\" header: %w", ErrDataMissing)
-	}
-	if !d.end {
-		return fmt.Errorf("[rapidyenc] end of article without finding \"=yend\" trailer: %w", ErrDataCorruption)
-	}
-	if (!d.part && d.Meta.FileSize != d.actualSize) || (d.part && d.Meta.PartSize != d.actualSize) {
-		return fmt.Errorf("[rapidyenc] expected size %d but got %d: %w", d.Meta.PartSize, d.actualSize, ErrDataCorruption)
-	}
-	if d.crc && d.expectedCrc != d.Meta.Hash {
-		return fmt.Errorf("[rapidyenc] expected decoded data to have CRC32 hash %#08x but got %#08x: %w", d.expectedCrc, d.Meta.Hash, ErrCrcMismatch)
-	}
-	return io.EOF
-}
-
-func (d *Decoder) decodeYenc(dst, src []byte) (int, int, error) {
-	nd, ns, end, err := DecodeIncremental(dst, src, &d.State)
-	if err != nil {
-		return 0, 0, fmt.Errorf("[rapidyenc] failed to decode incremental data: %w", err)
+// Next writes the decoded response body to w.
+func (d *Decoder) Next(w io.Writer) (*Response, error) {
+	response := &Response{
+		hasStatusLine: !d.statusLineConsumed,
 	}
 
-	if _, err := d.hash.Write(dst[:nd]); err != nil {
-		return 0, 0, fmt.Errorf("[rapidyenc] failed to hash data: %w", err)
-	}
-	d.actualSize += int64(nd)
-
-	if end == EndControl {
-		d.body = false
-		return nd, ns - 2, nil
-	}
-
-	if end == EndArticle {
-		d.body = false
-		return nd, ns - 3, io.EOF
-	}
-
-	if d.State == StateCRLFEQ {
-		// Special case: found "\r\n=" but no more data - might be start of =yend
-		d.State = StateCRLF
-		return nd, ns - 1, nil
-	}
-
-	return nd, ns, nil
-}
-
-func (d *Decoder) processYenc(line []byte) {
-	var err error
-	if bytes.HasPrefix(line, []byte("=ybegin ")) {
-		d.begin = true
-		d.Meta.FileSize, _ = extractInt(line, []byte(" size="))
-		d.Meta.FileName, _ = extractString(line, []byte(" name="))
-		if d.Meta.PartNumber, err = extractInt(line, []byte(" part=")); err != nil {
-			d.body = true
-			d.Meta.PartSize = d.Meta.FileSize
+	if err := d.rb.feedUntilDone(d.r, response, w); err != nil {
+		if !response.eof && errors.Is(err, io.EOF) {
+			return nil, io.ErrUnexpectedEOF
 		}
-		d.Meta.TotalParts, _ = extractInt(line, []byte(" total="))
-	} else if bytes.HasPrefix(line, []byte("=ypart ")) {
-		d.part = true
-		d.body = true
-		var begin int64
-		if begin, err = extractInt(line, []byte(" begin=")); err == nil {
-			d.Meta.Offset = begin - 1
-		}
-		if end, err := extractInt(line, []byte(" end=")); err == nil && begin > 0 {
-			d.Meta.PartSize = end - d.Meta.Offset
-		}
-	} else if bytes.HasPrefix(line, []byte("=yend ")) {
-		d.end = true
-		if d.part {
-			if crc, err := extractCRC(line, []byte(" pcrc32=")); err == nil {
-				d.expectedCrc = crc
-				d.crc = true
-			}
-		} else if crc, err := extractCRC(line, []byte(" crc32=")); err == nil {
-			d.expectedCrc = crc
-			d.crc = true
-		}
-		d.Meta.PartSize, _ = extractInt(line, []byte(" size="))
-		d.Meta.Hash = d.hash.Sum32()
-	}
-}
-
-func detectFormat(line []byte) Format {
-	if bytes.HasPrefix(line, []byte("=ybegin ")) {
-		return FormatYenc
-	}
-
-	length := len(line)
-	if (length == 60 || length == 61) && line[0] == 'M' {
-		return FormatUU
-	}
-
-	if bytes.HasPrefix(line, []byte("begin ")) {
-		ok := true
-		line := bytes.TrimSpace(line[len("begin "):])
-
-		for pos := 0; pos < len(line); pos++ {
-			char := line[pos]
-			if char == ' ' {
-				break
-			}
-
-			if char < '0' || char > '7' {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			return FormatUU
+		if !errors.Is(err, io.EOF) {
+			return response, err
 		}
 	}
 
-	return FormatUnknown
+	return response, nil
 }
 
 type Format int
@@ -340,63 +160,4 @@ func DecodeIncremental(dst, src []byte, state *State) (nDst, nSrc int, end End, 
 	))
 
 	return int(cnDest), int(cnSrc), result, nil
-}
-
-func extractString(data, substr []byte) (string, error) {
-	start := bytes.Index(data, substr)
-	if start == -1 {
-		return "", fmt.Errorf("substr not found: %s", substr)
-	}
-
-	data = data[start+len(substr):]
-	if end := bytes.IndexAny(data, "\x00\r\n"); end != -1 {
-		return string(data[:end]), nil
-	}
-
-	return string(data), nil
-}
-
-func extractInt(data, substr []byte) (int64, error) {
-	start := bytes.Index(data, substr)
-	if start == -1 {
-		return 0, fmt.Errorf("substr not found: %s", substr)
-	}
-
-	data = data[start+len(substr):]
-	if end := bytes.IndexAny(data, "\x00\x20\r\n"); end != -1 {
-		return strconv.ParseInt(string(data[:end]), 10, 64)
-	}
-
-	return strconv.ParseInt(string(data), 10, 64)
-}
-
-var (
-	errCrcNotfound = errors.New("crc not found")
-)
-
-// extractCRC converts a hexadecimal representation of a crc32 hash
-func extractCRC(data, substr []byte) (uint32, error) {
-	start := bytes.Index(data, substr)
-	if start == -1 {
-		return 0, errCrcNotfound
-	}
-
-	data = data[start+len(substr):]
-	end := bytes.IndexAny(data, "\x00\x20\r\n")
-	if end != -1 {
-		data = data[:end]
-	}
-
-	// Take up to the last 8 characters
-	parsed := data[len(data)-min(8, len(data)):]
-
-	// Left pad unexpected length with 0
-	if len(parsed) != 8 {
-		padded := []byte("00000000")
-		copy(padded[8-len(parsed):], parsed)
-		parsed = padded
-	}
-
-	_, err := hex.Decode(parsed, parsed)
-	return binary.BigEndian.Uint32(parsed), err
 }

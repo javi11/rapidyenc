@@ -32,14 +32,14 @@ func TestDecode(t *testing.T) {
 			encoded, err := body(raw)
 			require.NoError(t, err)
 
-			dec := NewDecoder(encoded)
+			dec := NewDecoder(encoded, WithStatusLineAlreadyRead())
 			b := bytes.NewBuffer(nil)
-			n, err := io.Copy(b, dec)
-			require.Equal(t, int64(len(raw)), n)
+			response, err := dec.Next(b)
+			require.Equal(t, len(raw), b.Len())
 			require.NoError(t, err)
 			require.Equal(t, raw, b.Bytes())
-			require.Equal(t, tc.crc, dec.Meta.Hash)
-			require.Equal(t, int64(len(raw)), dec.Meta.End())
+			require.Equal(t, tc.crc, response.CRC)
+			require.Equal(t, int64(len(raw)), response.End())
 		})
 	}
 }
@@ -61,9 +61,9 @@ func TestDecodeUU(t *testing.T) {
 			raw, err := io.ReadAll(f)
 			require.NoError(t, err)
 
-			dec := NewDecoder(bytes.NewReader(raw))
+			dec := NewDecoder(bytes.NewReader(raw), WithStatusLineAlreadyRead())
 			b := bytes.NewBuffer(nil)
-			_, err = io.Copy(b, dec)
+			_, err = dec.Next(b)
 			require.Error(t, err, ErrUU)
 			require.Equal(t, raw, b.Bytes()) // uudecode is not implemented; just test it is unchanged
 		})
@@ -117,13 +117,13 @@ func TestSplitReads(t *testing.T) {
 				}
 			}()
 
-			dec := NewDecoder(r)
+			dec := NewDecoder(r, WithStatusLineAlreadyRead())
 			b := bytes.NewBuffer(nil)
-			n, err := io.Copy(b, dec)
-			require.Equal(t, int64(len(raw)), n)
+			meta, err := dec.Next(b)
+			require.Equal(t, len(raw), b.Len())
 			require.NoError(t, err)
 			require.Equal(t, raw, b.Bytes())
-			require.Equal(t, int64(len(raw)), dec.Meta.End())
+			require.Equal(t, int64(len(raw)), meta.End())
 		})
 	}
 }
@@ -136,10 +136,10 @@ func BenchmarkDecoder(b *testing.B) {
 	r, err := body(raw)
 	require.NoError(b, err)
 
+	dec := NewDecoder(r, WithStatusLineAlreadyRead())
 	b.ResetTimer()
 	for b.Loop() {
-		dec := NewDecoder(r)
-		_, err = io.Copy(io.Discard, dec)
+		_, err = dec.Next(io.Discard)
 		require.NoError(b, err)
 		_, err = r.Seek(0, io.SeekStart)
 		require.NoError(b, err)
@@ -164,6 +164,9 @@ func body(raw []byte) (io.ReadSeeker, error) {
 		return nil, err
 	}
 	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	if _, err = w.Write([]byte(".\r\n")); err != nil {
 		return nil, err
 	}
 
