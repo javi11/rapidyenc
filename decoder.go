@@ -65,7 +65,6 @@ var (
 	ErrDataMissing    = errors.New("no binary data")
 	ErrDataCorruption = errors.New("data corruption detected") // io.EOF or ".\r\n" reached before =yend
 	ErrCrcMismatch    = errors.New("crc32 mismatch")
-	ErrUU             = errors.New("data is uuencoded")
 )
 
 type streamFeeder interface {

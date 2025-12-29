@@ -46,10 +46,12 @@ func TestDecode(t *testing.T) {
 
 func TestDecodeUU(t *testing.T) {
 	cases := []struct {
-		name string
-		path string
+		name   string
+		path   string
+		length int
+		crc    uint32
 	}{
-		{"logo_full", "testdata/logo_full.uu"},
+		{"logo_full", "testdata/logo_full.uu", 2184, 0x6BC2917D},
 	}
 
 	for _, tc := range cases {
@@ -58,14 +60,17 @@ func TestDecodeUU(t *testing.T) {
 			require.NoError(t, err)
 			defer f.Close()
 
-			raw, err := io.ReadAll(f)
+			w := new(bytes.Buffer)
+			io.Copy(w, f)
+			w.WriteString(".\r\n")
 			require.NoError(t, err)
 
-			dec := NewDecoder(bytes.NewReader(raw), WithStatusLineAlreadyRead())
+			dec := NewDecoder(w, WithStatusLineAlreadyRead())
 			b := bytes.NewBuffer(nil)
-			_, err = dec.Next(b)
-			require.Error(t, err, ErrUU)
-			require.Equal(t, raw, b.Bytes()) // uudecode is not implemented; just test it is unchanged
+			meta, err := dec.Next(b)
+			require.NoError(t, err)
+			require.Equal(t, tc.length, b.Len())
+			require.Equal(t, tc.crc, meta.CRC)
 		})
 	}
 }

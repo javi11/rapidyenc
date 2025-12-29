@@ -9,6 +9,7 @@ import (
 	"hash/crc32"
 	"io"
 	"strconv"
+	"unicode"
 )
 
 type Response struct {
@@ -20,7 +21,7 @@ type Response struct {
 	FileSize      int64 // Total size of the file
 	PartNumber    int64
 	Offset        int64 // Offset of the part within the file relative to the start, like io.Seeker or io.WriterAt
-	PartSize      int64 // Size of the unencoded data
+	PartSize      int64 // Expected size of the unencoded data
 	EndSize       int64
 	TotalParts    int64
 	ExpectedCRC   uint32
@@ -75,7 +76,7 @@ func (r *Response) Feed(buf []byte, out io.Writer) (consumed int, done bool, err
 
 func (r *Response) metaError() error {
 	if r.Format == FormatUU {
-		return ErrUU
+		return nil
 	}
 	if !r.hasBegin {
 		return fmt.Errorf("[rapidyenc] end of article without finding \"=ybegin\" header: %w", ErrDataMissing)
@@ -152,11 +153,8 @@ func (r *Response) decode(buf []byte, out io.Writer) (read int, err error) {
 					// =ypart was encountered, switch to body decoding
 				}
 			case FormatUU:
-				// TODO: does not uudecode, for now just copies encoded data
-				if _, err := io.Copy(out, bytes.NewReader(line)); err != nil {
-					return read, err
-				}
-				if _, err := out.Write([]byte("\r\n")); err != nil {
+				err := r.decodeUU(line, out)
+				if err != nil {
 					return read, err
 				}
 			}
@@ -324,6 +322,112 @@ func (r *Response) decodeYenc(buf []byte, out io.Writer) (n int64, err error) {
 	}
 
 	return n, nil
+}
+
+func (r *Response) decodeUU(line []byte, out io.Writer) error {
+	// Detect 'begin' line and extract filename
+	if !r.body {
+		if bytes.HasPrefix(line, []byte("begin ")) {
+			line = line[6:]
+			line = bytes.TrimLeft(line, " ")                 // skip leading spaces
+			line = bytes.TrimLeftFunc(line, unicode.IsDigit) // skip permissions
+			line = bytes.TrimLeft(line, " ")                 // skip spaces after permissions
+
+			// The rest of the line is the filename
+			r.FileName = string(line)
+
+			r.body = true
+			return nil
+		}
+
+		// Begin missing but looks like UUEncode: 60 or 61 chars, starts with 'M'
+		if (len(line) == 60 || len(line) == 61) && line[0] == 'M' {
+			r.body = true
+		}
+	}
+
+	// Detect 'end' line
+	if r.body && (bytes.Equal(line, []byte("`")) || bytes.Equal(line, []byte("end"))) {
+		r.body = false
+		r.FileSize = r.BytesProduced
+		return nil
+	}
+
+	// Decode body lines
+	if r.body {
+		// Ignore junk
+		if len(line) == 0 || bytes.Equal(line, []byte("-- ")) || bytes.HasPrefix(line, []byte("Posted via ")) {
+			return nil
+		}
+
+		// Remove dot stuffing
+		if bytes.HasPrefix(line, []byte("..")) {
+			line = line[1:]
+		}
+
+		effLen := decodeUUChar(line[0])
+		if effLen > len(line)-1 {
+			// Workaround for broken uuencoders by Fredrik Lundh
+			effLen = decodeUUCharWorkaround(line[0])
+			if effLen > len(line)-1 {
+				// Bad line
+				r.hasBadData = true
+				return nil
+			}
+		}
+
+		line = line[1:] // skip length byte
+		reader := bytes.NewReader(line)
+
+		decoded := make([]byte, 0, effLen)
+
+		uu := func() (byte, error) {
+			b, err := reader.ReadByte()
+			if err != nil {
+				return 0, err
+			}
+			return byte(decodeUUChar(b)), nil
+		}
+
+		var err error
+		var c0, c1, c2, c3 byte
+
+		for ; effLen > 0 && reader.Len() >= 4; effLen -= 3 {
+			chunk := min(effLen, 3)
+			if c0, err = uu(); err != nil {
+				break
+			}
+			if c1, err = uu(); err != nil {
+				break
+			}
+			c2 = 0
+			decoded = append(decoded, c0<<2|c1>>4)
+
+			if chunk > 1 {
+				if c2, err = uu(); err != nil {
+					break
+				}
+				decoded = append(decoded, c1<<4|c2>>2)
+			}
+
+			if chunk > 2 {
+				if c3, err = uu(); err != nil {
+					break
+				}
+				decoded = append(decoded, c2<<6|c3)
+			}
+		}
+
+		if len(decoded) > 0 {
+			if _, err := out.Write(decoded); err != nil {
+				return err
+			}
+			r.BytesProduced += int64(len(decoded))
+			r.CRC = crc32.Update(r.CRC, crc32.IEEETable, decoded)
+		}
+	}
+
+	return nil
 }
 
 func (r *Response) processYencHeader(line []byte) {
