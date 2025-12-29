@@ -63,7 +63,9 @@ type streamFeeder interface {
 	Feed(in []byte, out io.Writer) (consumed int, done bool, err error)
 }
 
-// Next writes the decoded response body to w.
+// Next reads from r until a complete response is decoded.
+// If r is a net.Conn, the caller is responsible for settings deadlines.
+// The decoded response body is written to w.
 func (d *Decoder) Next(w io.Writer) (*Response, error) {
 	response := &Response{
 		hasStatusLine: !d.statusLineConsumed,
@@ -71,6 +73,7 @@ func (d *Decoder) Next(w io.Writer) (*Response, error) {
 
 	if err := d.rb.feedUntilDone(d.r, response, w); err != nil {
 		if !response.eof && errors.Is(err, io.EOF) {
+			// r return EOF but end of NNTP response was not reached
 			return nil, io.ErrUnexpectedEOF
 		}
 		if !errors.Is(err, io.EOF) {

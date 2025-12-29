@@ -51,9 +51,9 @@ output := bytes.NewBuffer(nil)
 
 // Will read from input until io.EOF or ".\r\n"
 dec := NewDecoder(input)
-n, err := io.Copy(output, dec) // Copy decoded data to output
+meta, err := dec.Next(output) // Writes decoded data to output
 
-// if err == nil then dec.Meta contains yEnc headers
+// if err == nil then meta contains yEnc headers
 ```
 
 ## Building from Source
