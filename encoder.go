@@ -62,15 +62,15 @@ func NewEncoder(w io.Writer, m Meta, opts ...EncoderOption) (e *Encoder, err err
 
 // WithLineLength configures the encoded line length
 func WithLineLength(lineLength int) EncoderOption {
-	return func(o *Encoder) {
-		o.lineLength = lineLength
+	return func(e *Encoder) {
+		e.lineLength = lineLength
 	}
 }
 
 // WithRaw option encodes without writing yenc headers
 func WithRaw() EncoderOption {
-	return func(o *Encoder) {
-		o.raw = true
+	return func(e *Encoder) {
+		e.raw = true
 	}
 }
 

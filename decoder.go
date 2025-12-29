@@ -29,35 +29,27 @@ type Decoder struct {
 	statusLineConsumed bool // Has the caller already consumed the status line; if so trust that it is a multiline response
 }
 
-type decoderOptions struct {
-	statusLineAlreadyRead bool
-	readBufferSize        int
-}
-
-type DecoderOption func(*decoderOptions)
+type DecoderOption func(d *Decoder)
 
 func NewDecoder(r io.Reader, opts ...DecoderOption) *Decoder {
-	o := decoderOptions{readBufferSize: defaultReadBufSize}
+	d := &Decoder{r: r}
+
 	for _, opt := range opts {
-		opt(&o)
+		opt(d)
 	}
 
-	return &Decoder{
-		r:                  r,
-		rb:                 readBuffer{buf: make([]byte, o.readBufferSize)},
-		statusLineConsumed: o.statusLineAlreadyRead,
-	}
+	return d
 }
 
 func WithStatusLineAlreadyRead() DecoderOption {
-	return func(o *decoderOptions) {
-		o.statusLineAlreadyRead = true
+	return func(d *Decoder) {
+		d.statusLineConsumed = true
 	}
 }
 
 func WithBufferSize(size int) DecoderOption {
-	return func(o *decoderOptions) {
-		o.readBufferSize = size
+	return func(d *Decoder) {
+		d.rb = readBuffer{buf: make([]byte, size)}
 	}
 }
 
