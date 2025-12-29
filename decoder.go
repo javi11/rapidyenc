@@ -67,6 +67,10 @@ type streamFeeder interface {
 // If r is a net.Conn, the caller is responsible for settings deadlines.
 // The decoded response body is written to w.
 func (d *Decoder) Next(w io.Writer) (*Response, error) {
+	if w == nil {
+		return nil, errors.New("nil writer")
+	}
+
 	response := &Response{
 		hasStatusLine: !d.statusLineConsumed,
 	}
