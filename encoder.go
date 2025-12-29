@@ -23,6 +23,7 @@ type Encoder struct {
 
 	hash       hash.Hash32
 	lineLength int
+	raw        bool // Encode without yenc headers
 	column     int
 	processed  int64
 
@@ -33,17 +34,24 @@ type Encoder struct {
 	hashErrs errgroup.Group
 }
 
+type EncoderOption func(*Encoder)
+
 // NewEncoder returns a new [Encoder].
 // Writes to the returned writer are yEnc encoded and written to w.
 //
 // It is the caller's responsibility to call Close on the [Encoder] when done.
-func NewEncoder(w io.Writer, m Meta) (e *Encoder, err error) {
+func NewEncoder(w io.Writer, m Meta, opts ...EncoderOption) (e *Encoder, err error) {
 	maybeInitEncode()
 
-	e = new(Encoder)
-	e.lineLength = 128
-	e.hash = crc32.NewIEEE()
-	e.endByte = make([]byte, 0, 1)
+	e = &Encoder{
+		lineLength: 128,
+		hash:       crc32.NewIEEE(),
+		endByte:    make([]byte, 0, 1),
+	}
+
+	for _, opt := range opts {
+		opt(e)
+	}
 
 	if err := e.Reset(w, m); err != nil {
 		return nil, err
@@ -52,12 +60,28 @@ func NewEncoder(w io.Writer, m Meta) (e *Encoder, err error) {
 	return
 }
 
+// WithLineLength configures the encoded line length
+func WithLineLength(lineLength int) EncoderOption {
+	return func(o *Encoder) {
+		o.lineLength = lineLength
+	}
+}
+
+// WithRaw option encodes without writing yenc headers
+func WithRaw() EncoderOption {
+	return func(o *Encoder) {
+		o.raw = true
+	}
+}
+
 // Reset discards the [Encoder] e's state and makes it equivalent to the
 // result of its original state from [NewEncoder], but writing to w instead.
 // This permits reusing a [Encoder] rather than allocating a new one.
 func (e *Encoder) Reset(w io.Writer, meta Meta) error {
-	if err := meta.validate(); err != nil {
-		return err
+	if !e.raw {
+		if err := meta.validate(); err != nil {
+			return err
+		}
 	}
 
 	e.writeMu.Lock()
@@ -101,7 +125,7 @@ func (e *Encoder) Write(p []byte) (n int, err error) {
 		}
 	}()
 
-	if !e.m.Raw {
+	if !e.raw {
 		if _, err := e.writeHeader(); err != nil {
 			return 0, err
 		}
@@ -173,7 +197,7 @@ func (e *Encoder) Close() error {
 		}
 	}
 
-	if !e.m.Raw {
+	if !e.raw {
 		if _, err := fmt.Fprintf(e.w, "\r\n=yend size=%d part=%d pcrc32=%08x\r\n", e.m.PartSize, e.m.PartNumber, e.hash.Sum32()); err != nil {
 			return err
 		}

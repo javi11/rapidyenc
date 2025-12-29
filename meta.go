@@ -4,7 +4,6 @@ import "errors"
 
 // Meta is the result of parsing the yEnc headers (ybegin, ypart, yend)
 type Meta struct {
-	Raw        bool // Encode body without the yEnc headers
 	FileName   string
 	FileSize   int64 // Total size of the file
 	PartNumber int64
@@ -23,11 +22,6 @@ func (m Meta) End() int64 {
 	return m.Offset + m.PartSize
 }
 
-type DecodedMeta struct {
-	Meta
-	Hash uint32 // CRC32 hash of the decoded data
-}
-
 var (
 	errFileNameEmpty = errors.New("file name is empty")
 	errFileSize      = errors.New("file size is less than or equal to zero")
@@ -38,9 +32,6 @@ var (
 )
 
 func (m Meta) validate() error {
-	if m.Raw {
-		return nil
-	}
 	if len(m.FileName) == 0 {
 		return errFileNameEmpty
 	}
