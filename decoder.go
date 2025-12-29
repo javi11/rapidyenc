@@ -41,6 +41,7 @@ func NewDecoder(r io.Reader, opts ...DecoderOption) *Decoder {
 	return d
 }
 
+// WithStatusLineAlreadyRead the decoder assumes the stream is positioned at the start of a multiline response body.
 func WithStatusLineAlreadyRead() DecoderOption {
 	return func(d *Decoder) {
 		d.statusLineConsumed = true
