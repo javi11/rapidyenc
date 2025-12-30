@@ -50,13 +50,14 @@ func TestDecodePattern(t *testing.T) {
 		pattern string
 	}{
 		{"foobar", "A0B1C2D3E4F5G6H7"},
+		{"alpha", "11111111222222223333333344444444555555556666666677777777888888889999999900000000"},
 		{"special", "\u0004\u0004\u0004\u0004"},
 	}
 
+	length := 512
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			length := (1024 / len(tc.pattern)) + 1
-			raw := bytes.Repeat([]byte(tc.pattern), length)
+			raw := bytes.Repeat([]byte(tc.pattern), length/len(tc.pattern)+1)[:length]
 
 			encoded := bytes.NewBuffer(nil)
 			enc, err := NewEncoder(encoded, Meta{

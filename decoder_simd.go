@@ -3,6 +3,7 @@
 package rapidyenc
 
 import (
+	"bytes"
 	"sync"
 	"unsafe"
 )
@@ -33,19 +34,28 @@ func maybeInitLUT() {
 }
 
 func decodeSIMD(
-		width int,
-		dest []byte,
-		src []byte,
-		state *State,
-		kernel func(dest, src []byte, escFirst *uint8, nextMask *uint16) (int, int),
+	width int,
+	dest []byte,
+	src []byte,
+	state *State,
+	kernel func(dest, src []byte, escFirst *uint8, nextMask *uint16) (int, int),
 ) (nSrc int, decoded []byte, end End, err error) {
 	const isRaw = true
+	const searchEnd = true
+	const print = true
 	length := len(src)
+
+	if print {
+		println("\nlength", length)
+	}
 
 	consumed := 0
 	produced := 0
 
 	if len(src) <= width*2 {
+		if print {
+			println(len(src), "<=", width*2)
+		}
 		return decodeGeneric(dest, src, state)
 	}
 
@@ -58,6 +68,9 @@ func decodeSIMD(
 	if uintptr(unsafe.Pointer(&src[0]))&(uintptr(width)-1) != 0 {
 		alignOffset := int(uintptr(width) - (uintptr(unsafe.Pointer(&src[0])) & uintptr(width-1)))
 		length -= alignOffset
+		if print {
+			println("offset", alignOffset, len(src))
+		}
 		nSrc, decoded, end, err = decodeGeneric(dest, src[:length], pState)
 		if end != EndNone {
 			return nSrc, decoded, end, err
@@ -68,8 +81,13 @@ func decodeSIMD(
 	}
 
 	lenBuffer := width - 1
-	if isRaw {
-		lenBuffer += 2
+	if searchEnd {
+		lenBuffer += 3
+		if isRaw {
+			lenBuffer += 1
+		}
+	} else if isRaw {
+		lenBuffer += 3
 	}
 
 	if len(src) > lenBuffer {
@@ -81,13 +99,52 @@ func decodeSIMD(
 		case StateCRLF:
 			if isRaw && src[0] == '.' {
 				nextMask = 1
+				if searchEnd && bytes.Equal(src[1:], []byte("\r\n")) {
+					*pState = StateCRLF
+					return 3, dest[:0], EndArticle, nil
+				}
+				if searchEnd && bytes.Equal(src[1:], []byte("=y")) {
+					*pState = StateNone
+					return 3, dest[:0], EndControl, nil
+				}
+			} else if searchEnd && bytes.Equal(src, []byte("=y")) {
+				*pState = StateNone
+				return 2, dest[:0], EndControl, nil
 			}
 		case StateCR:
 			if isRaw && len(src) >= 2 && src[0] == '\n' && src[1] == '.' {
 				nextMask = 2
+				if searchEnd && bytes.Equal(src[2:], []byte("\r\n")) {
+					*pState = StateCRLF
+					return 4, dest[:0], EndArticle, nil
+				}
+				if searchEnd && bytes.Equal(src[2:], []byte("=y")) {
+					*pState = StateNone
+					return 4, dest[:0], EndControl, nil
+				}
+			} else if searchEnd && bytes.Equal(src[2:], []byte("\n=y")) {
+				*pState = StateNone
+				return 3, dest[:0], EndControl, nil
 			}
-		case StateCRLFDT, StateCRLFDTCR, StateCRLFEQ:
-			// All searchEnd only cases – skip
+		case StateCRLFDT:
+			if searchEnd && bytes.Equal(src, []byte("\r\n")) {
+				*pState = StateCRLF
+				return 2, dest[:0], EndArticle, nil
+			}
+			if searchEnd && bytes.Equal(src, []byte("=y")) {
+				*pState = StateNone
+				return 2, dest[:0], EndControl, nil
+			}
+		case StateCRLFDTCR:
+			if searchEnd && bytes.Equal(src, []byte("\n")) {
+				*pState = StateCRLF
+				return 1, dest[:0], EndArticle, nil
+			}
+		case StateCRLFEQ:
+			if searchEnd && bytes.Equal(src, []byte("y")) {
+				*pState = StateNone
+				return 1, dest[:0], EndControl, nil
+			}
 		}
 
 		if *pState == StateEQ || *pState == StateCRLFEQ {
@@ -99,9 +156,17 @@ func decodeSIMD(
 			dLen = len(src)
 		}
 
+		if print {
+			println("kernel", dLen, "=>", consumed, produced)
+		}
 		c, p := kernel(dest[produced:], src[:dLen], &escFirst, &nextMask)
+		if print {
+			println("kernel done", c, p)
+		}
 		consumed += c
 		produced += p
+		src = src[dLen:]
+		length -= dLen
 
 		switch {
 		case escFirst > 0:
@@ -113,17 +178,23 @@ func decodeSIMD(
 		default:
 			*pState = StateNone
 		}
-
-		src = src[dLen:]
-		length -= dLen
 	}
 
 	if len(src) > 0 {
+		if print {
+			println("generic", len(src), consumed, produced)
+		}
 		c, decoded, end, err := decodeGeneric(dest[produced:], src, pState)
 		consumed += c
 		produced += len(decoded)
+		if print {
+			println("generic done", consumed, produced)
+		}
 		return consumed, dest[:produced], end, err
 	}
 
+	if print {
+		println("normal", consumed, produced)
+	}
 	return consumed, dest[:produced], EndNone, nil
 }
