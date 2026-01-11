@@ -21,6 +21,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 	// TODO: need this?
 	isRaw := true
 	searchEnd := true
+	print := false
 
 	var yencOffset archsimd.Int8x32
 	if *escFirst > 0 {
@@ -63,7 +64,9 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 	low4 := archsimd.BroadcastUint8x32(0x0f)
 
 	for ; consumed < len(src); consumed += 32 * 2 {
-		println(fmt.Sprintf("%d/%d", consumed, len(src)))
+		if print {
+			println(fmt.Sprintf("%d/%d", consumed, len(src)))
+		}
 		oDataA := archsimd.LoadUint8x32SlicePart(src[consumed:]).AsInt8x32()
 		oDataB := archsimd.LoadUint8x32SlicePart(src[consumed+32:]).AsInt8x32()
 
@@ -87,7 +90,9 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 		mask := uint64(b)<<32 + uint64(a)
 
 		if mask > 0 {
-			println("mask", consumed, mask, fmt.Sprintf("%064b", mask))
+			if print {
+				println("mask", consumed, mask, fmt.Sprintf("%064b", mask))
+			}
 		}
 
 		var dataA, dataB archsimd.Int8x32
@@ -280,12 +285,16 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				// Store lower 128 bits
 				dataA.GetLo().AsUint8x16().StoreSlice(dest[produced:])
 				nAlo := 16 - bits.OnesCount32(uint32(mask&0xffff))
-				println(fmt.Sprintf("%02x", produced), nAlo, hex.EncodeToString(dest[produced:produced+16]))
+				if print {
+					println(fmt.Sprintf("%02x", produced), nAlo, hex.EncodeToString(dest[produced:produced+16]))
+				}
 				produced += nAlo
 				//// Store upper 128 bits
 				dataA.GetHi().AsUint8x16().StoreSlice(dest[produced:])
 				nAhi := 16 - bits.OnesCount32(uint32(mask&0xffff0000))
-				println(fmt.Sprintf("%02x", produced), nAhi, hex.EncodeToString(dest[produced:produced+16]))
+				if print {
+					println(fmt.Sprintf("%02x", produced), nAhi, hex.EncodeToString(dest[produced:produced+16]))
+				}
 				produced += nAhi
 
 				mask >>= 28
@@ -298,17 +307,25 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				// Store lower 128 bits
 				dataB.GetLo().AsUint8x16().StoreSlice(dest[produced:])
 				nBlo := 16 - bits.OnesCount32(uint32(mask&0xffff0))
-				println(fmt.Sprintf("%02x", produced), nBlo, hex.EncodeToString(dest[produced:produced+16]))
+				if print {
+					println(fmt.Sprintf("%02x", produced), nBlo, hex.EncodeToString(dest[produced:produced+16]))
+				}
 				produced += nBlo
 				// Store upper 128 bits
 				dataB.GetHi().AsUint8x16().StoreSlice(dest[produced:])
 				nBhi := 16 - bits.OnesCount32(uint32(mask>>20))
-				println(fmt.Sprintf("%02x", produced), nBhi, hex.EncodeToString(dest[produced:produced+16]))
+				if print {
+					println(fmt.Sprintf("%02x", produced), nBhi, hex.EncodeToString(dest[produced:produced+16]))
+				}
 				produced += nBhi
 			}
-			println("long")
+			if print {
+				println("long")
+			}
 		} else {
-			println("short", mask, fmt.Sprintf("%02x", produced))
+			if print {
+				println("short", mask, fmt.Sprintf("%02x", produced))
+			}
 			// if(use_isa < ISA_LEVEL_AVX3)
 			dataA = oDataA.Add(yencOffset)
 			dataB = oDataB.Add(archsimd.BroadcastInt8x32(-42))

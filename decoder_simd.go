@@ -34,15 +34,15 @@ func maybeInitLUT() {
 }
 
 func decodeSIMD(
-	width int,
-	dest []byte,
-	src []byte,
-	state *State,
-	kernel func(dest, src []byte, escFirst *uint8, nextMask *uint16) (int, int),
+		width int,
+		dest []byte,
+		src []byte,
+		state *State,
+		kernel func(dest, src []byte, escFirst *uint8, nextMask *uint16) (int, int),
 ) (nSrc int, decoded []byte, end End, err error) {
 	const isRaw = true
 	const searchEnd = true
-	const print = true
+	const print = false
 	length := len(src)
 
 	if print {

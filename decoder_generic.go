@@ -152,7 +152,6 @@ done:
 					if c == '\r' {
 						pos--
 					}
-					pos++
 				}
 			}
 			fallthrough
@@ -175,7 +174,7 @@ done:
 	*state = StateNone
 
 	// 2nd last char
-	if pos == len(src)-2 {
+	if pos == length-2 {
 		c := src[pos]
 		switch c {
 		case '\r':
