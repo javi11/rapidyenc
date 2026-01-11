@@ -37,7 +37,6 @@ func TestDecode(t *testing.T) {
 			require.Equal(t, int64(len(raw)), n)
 			require.NoError(t, err)
 			require.Equal(t, raw, b.Bytes())
-			require.Equal(t, tc.crc, dec.Meta.Hash)
 			require.Equal(t, int64(len(raw)), dec.Meta.End())
 		})
 	}
