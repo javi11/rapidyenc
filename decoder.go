@@ -49,9 +49,10 @@ func WithStatusLineAlreadyRead() DecoderOption {
 	}
 }
 
+// WithBufferSize allows the caller to customise the size of the internal buffer used by the decoder
 func WithBufferSize(size int) DecoderOption {
 	return func(d *Decoder) {
-		d.rb = readBuffer{buf: make([]byte, size)}
+		d.rb = readBuffer{buf: make([]byte, max(1024, size))}
 	}
 }
 
