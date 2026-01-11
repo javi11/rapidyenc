@@ -26,6 +26,7 @@ jobs:
       - name: Run tests
         env:
           GOEXPERIMENT: simd
+          CGO_ENABLED: 0
         run: go run gotest.tools/gotestsum@latest --junitfile unit-tests.xml --format pkgname -- ./...
 
       - name: Test Summary
