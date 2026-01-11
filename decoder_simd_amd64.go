@@ -248,39 +248,19 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				*escFirst = uint8(maskEq >> 63)
 
 				{
-					// Build 64‑bit “prev was =” mask: (maskEq << 1) + escFirst
-					maskEqShift1 := (maskEq << 1) + uint64(*escFirst)
-
-					// Expand maskEqShift1 into a byte mask for A lane, using same pattern
-					vMaskShift := archsimd.BroadcastUint64x4(maskEqShift1)
-					vMaskBytes := vMaskShift.AsUint8x32()
-					bitMask := archsimd.BroadcastUint64x4(0x8040201008040201).AsUint8x32()
-
-					vFollowA := vMaskBytes.
-						PermuteOrZeroGrouped(archsimd.LoadInt8x32(&[32]int8{
-							0, 0, 0, 0, 1, 1, 1, 1,
-							2, 2, 2, 2, 3, 3, 3, 3,
-							0, 0, 0, 0, 1, 1, 1, 1,
-							2, 2, 2, 2, 3, 3, 3, 3,
-						})).
-						And(bitMask).
-						Equal(bitMask).
-						ToInt8x32()
-
-					cmpEqA = vFollowA.ToMask()
-					printHex32("cmpEqA", cmpEqA.ToInt8x32().AsUint8x32())
-
-					cmpEqB := archsimd.BroadcastInt8x32('=').
-						Equal(archsimd.LoadUint8x32Slice(src[consumed-1+32:]).AsInt8x32())
-					printHex32("cmpEqB", cmpEqB.ToInt8x32().AsUint8x32())
-
-					dataA = oDataA.Add(
-						archsimd.BroadcastInt8x32(-42-64).Merge(yencOffset, cmpEqA),
+					vecA := archsimd.BroadcastInt8x32(-42-64).Merge(
+						yencOffset,
+						cmpEqA.ToInt8x32().AsUint8x32().ConcatShiftBytesRightGrouped(
+							15,
+							archsimd.BroadcastInt8x32('=').SetHi(cmpEqA.ToInt8x32().GetLo()).AsUint8x32(),
+						).Equal(archsimd.BroadcastUint8x32(0xff)),
 					)
-
-					dataB = oDataB.Add(
-						archsimd.BroadcastInt8x32(-42-64).Merge(archsimd.BroadcastInt8x32(-42), cmpEqB),
+					vecB := archsimd.BroadcastInt8x32(-42-64).Merge(
+						archsimd.BroadcastInt8x32(-42),
+						archsimd.BroadcastInt8x32('=').Equal(archsimd.LoadUint8x32Slice(src[consumed-1+32:]).AsInt8x32()),
 					)
+					dataA = oDataA.Add(vecA)
+					dataB = oDataB.Add(vecB)
 				}
 			}
 
