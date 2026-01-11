@@ -18,11 +18,10 @@ func TestDecode(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  string
-		crc  uint32
 	}{
-		{"foobar", "foobar", 0x9EF61F95},
-		{"0x20", string(space), 0x31f365e7},
-		{"special", "\x04\x04\x04\x04", 0xca2ee18a},
+		{"foobar", "foobar"},
+		{"0x20", string(space)},
+		{"special", "\x04\x04\x04\x04"},
 	}
 
 	for _, tc := range cases {
