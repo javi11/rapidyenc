@@ -21,7 +21,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 	// TODO: need this?
 	isRaw := true
 	searchEnd := true
-	print := false
+	verbose := false
 
 	var yencOffset archsimd.Int8x32
 	if *escFirst > 0 {
@@ -64,7 +64,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 	low4 := archsimd.BroadcastUint8x32(0x0f)
 
 	for ; consumed < len(src); consumed += 32 * 2 {
-		if print {
+		if verbose {
 			println(fmt.Sprintf("%d/%d", consumed, len(src)))
 		}
 		oDataA := archsimd.LoadUint8x32SlicePart(src[consumed:]).AsInt8x32()
@@ -90,7 +90,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 		mask := uint64(b)<<32 + uint64(a)
 
 		if mask > 0 {
-			if print {
+			if verbose {
 				println("mask", consumed, mask, fmt.Sprintf("%064b", mask))
 			}
 		}
@@ -285,14 +285,14 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				// Store lower 128 bits
 				dataA.GetLo().AsUint8x16().StoreSlice(dest[produced:])
 				nAlo := 16 - bits.OnesCount32(uint32(mask&0xffff))
-				if print {
+				if verbose {
 					println(fmt.Sprintf("%02x", produced), nAlo, hex.EncodeToString(dest[produced:produced+16]))
 				}
 				produced += nAlo
 				//// Store upper 128 bits
 				dataA.GetHi().AsUint8x16().StoreSlice(dest[produced:])
 				nAhi := 16 - bits.OnesCount32(uint32(mask&0xffff0000))
-				if print {
+				if verbose {
 					println(fmt.Sprintf("%02x", produced), nAhi, hex.EncodeToString(dest[produced:produced+16]))
 				}
 				produced += nAhi
@@ -307,23 +307,23 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				// Store lower 128 bits
 				dataB.GetLo().AsUint8x16().StoreSlice(dest[produced:])
 				nBlo := 16 - bits.OnesCount32(uint32(mask&0xffff0))
-				if print {
+				if verbose {
 					println(fmt.Sprintf("%02x", produced), nBlo, hex.EncodeToString(dest[produced:produced+16]))
 				}
 				produced += nBlo
 				// Store upper 128 bits
 				dataB.GetHi().AsUint8x16().StoreSlice(dest[produced:])
 				nBhi := 16 - bits.OnesCount32(uint32(mask>>20))
-				if print {
+				if verbose {
 					println(fmt.Sprintf("%02x", produced), nBhi, hex.EncodeToString(dest[produced:produced+16]))
 				}
 				produced += nBhi
 			}
-			if print {
+			if verbose {
 				println("long")
 			}
 		} else {
-			if print {
+			if verbose {
 				println("short", mask, fmt.Sprintf("%02x", produced))
 			}
 			// if(use_isa < ISA_LEVEL_AVX3)

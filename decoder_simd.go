@@ -42,10 +42,10 @@ func decodeSIMD(
 ) (nSrc int, decoded []byte, end End, err error) {
 	const isRaw = true
 	const searchEnd = true
-	const print = false
+	const verbose = false
 	length := len(src)
 
-	if print {
+	if verbose {
 		println("\nlength", length)
 	}
 
@@ -53,7 +53,7 @@ func decodeSIMD(
 	produced := 0
 
 	if len(src) <= width*2 {
-		if print {
+		if verbose {
 			println(len(src), "<=", width*2)
 		}
 		return decodeGeneric(dest, src, state)
@@ -68,7 +68,7 @@ func decodeSIMD(
 	if uintptr(unsafe.Pointer(&src[0]))&(uintptr(width)-1) != 0 {
 		alignOffset := int(uintptr(width) - (uintptr(unsafe.Pointer(&src[0])) & uintptr(width-1)))
 		length -= alignOffset
-		if print {
+		if verbose {
 			println("offset", alignOffset, len(src))
 		}
 		nSrc, decoded, end, err = decodeGeneric(dest, src[:length], pState)
@@ -156,11 +156,11 @@ func decodeSIMD(
 			dLen = len(src)
 		}
 
-		if print {
+		if verbose {
 			println("kernel", dLen, "=>", consumed, produced)
 		}
 		c, p := kernel(dest[produced:], src[:dLen], &escFirst, &nextMask)
-		if print {
+		if verbose {
 			println("kernel done", c, p)
 		}
 		consumed += c
@@ -181,19 +181,19 @@ func decodeSIMD(
 	}
 
 	if len(src) > 0 {
-		if print {
+		if verbose {
 			println("generic", len(src), consumed, produced)
 		}
 		c, decoded, end, err := decodeGeneric(dest[produced:], src, pState)
 		consumed += c
 		produced += len(decoded)
-		if print {
+		if verbose {
 			println("generic done", consumed, produced)
 		}
 		return consumed, dest[:produced], end, err
 	}
 
-	if print {
+	if verbose {
 		println("normal", consumed, produced)
 	}
 	return consumed, dest[:produced], EndNone, nil
