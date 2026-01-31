@@ -85,9 +85,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 		cmpB := oDataB.Equal(lut.PermuteOrZeroGrouped(idxB))
 
 		// Build 64-bit mask
-		a := toBits(cmpA)
-		b := toBits(cmpB)
-		mask := uint64(b)<<32 + uint64(a)
+		mask := uint64(cmpB.ToBits())<<32 + uint64(cmpA.ToBits())
 
 		if mask > 0 {
 			if verbose {
@@ -99,7 +97,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 		if mask != 0 {
 			cmpEqA := oDataA.Equal(archsimd.BroadcastInt8x32('='))
 			cmpEqB := oDataB.Equal(archsimd.BroadcastInt8x32('='))
-			maskEq := uint64(toBits(cmpEqB))<<32 | uint64(toBits(cmpEqA))
+			maskEq := uint64(cmpEqB.ToBits())<<32 | uint64(cmpEqA.ToBits())
 
 			var match2NlDotA archsimd.Mask8x32
 			var match2NlDotB archsimd.Mask8x32
@@ -123,7 +121,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 					// find patterns of \r_.
 					match2CrXDtA = oDataA.Equal(archsimd.BroadcastInt8x32('\r')).And(tmpData2A.Equal(archsimd.BroadcastInt8x32('.')))
 					match2CrXDtB = oDataB.Equal(archsimd.BroadcastInt8x32('\r')).And(tmpData2B.Equal(archsimd.BroadcastInt8x32('.')))
-					partialKillDotFound = toBits(match2CrXDtA.Or(match2CrXDtB))
+					partialKillDotFound = match2CrXDtA.Or(match2CrXDtB).ToBits()
 				}
 
 				var match1NlA archsimd.Mask8x32
@@ -166,7 +164,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 							match3EndA := match3EqYA.And(match1NlA)
 							match3EndB := match3EqYB.And(match1NlB)
 							// combine match sequences
-							matchEnd = toBits(match4EndA.Or(match3EndA).Or(match4EndB.Or(match3EndB)))
+							matchEnd = match4EndA.Or(match3EndA).Or(match4EndB.Or(match3EndB)).ToBits()
 						}
 
 						if matchEnd > 0 {
@@ -178,8 +176,8 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 						}
 					}
 					{
-						mask |= uint64(toBits(match2NlDotA)) << 2
-						mask |= uint64(toBits(match2NlDotB)) << 34
+						mask |= uint64(match2NlDotA.ToBits()) << 2
+						mask |= uint64(match2NlDotB.ToBits()) << 34
 						match2NlDotB := match2NlDotB.ToInt8x32().GetHi().AsInt32x4().ShiftAllLeft(14).AsInt8x16().ExtendToInt16().AsInt8x32()
 						minMask = archsimd.BroadcastInt8x32('.').SubSaturated(match2NlDotB)
 					}
@@ -191,7 +189,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 						match3YB := archsimd.BroadcastInt8x32('y').Equal(archsimd.LoadUint8x32SlicePart(src[consumed+3+32:]).AsInt8x32())
 						match3EqYA = match2EqA.And(match3YA)
 						match3EqYB = match2EqB.And(match3YB)
-						partialEndFound = toBits(match3EqYA.Or(match3EqYB)) > 0
+						partialEndFound = match3EqYA.Or(match3EqYB).ToBits() > 0
 					}
 					if partialEndFound {
 						endFound := false
@@ -200,7 +198,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 							match1LfB := archsimd.BroadcastInt8x32('\n').Equal(archsimd.LoadUint8x32SlicePart(src[consumed+1+32:]).AsInt8x32())
 							a := match3EqYA.And(match1LfA.And(archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32().Equal(archsimd.BroadcastInt8x32('\r'))))
 							b := match3EqYB.And(match1LfB.And(archsimd.LoadUint8x32SlicePart(src[consumed+32:]).AsInt8x32().Equal(archsimd.BroadcastInt8x32('\r'))))
-							endFound = toBits(a.Or(b)) > 0
+							endFound = a.Or(b).ToBits() > 0
 						}
 						if endFound {
 							//consumed += consumed
@@ -347,17 +345,6 @@ func printHex32(label string, shuf archsimd.Uint8x32) {
 		print(fmt.Sprintf("\\x%08x", tmp[i]))
 	}
 	println()
-}
-
-// toBits extract MSB of each int8 and place in corresponding bit
-func toBits(mask archsimd.Mask8x32) uint32 {
-	var tmp [32]int8
-	mask.ToInt8x32().Store(&tmp)
-	var bits uint32 = 0
-	for i := 0; i < 32; i++ {
-		bits |= (uint32(tmp[i]) >> 7 & 1) << i
-	}
-	return bits
 }
 
 func decoder_set_nextMask(isRaw bool, src []byte, position int, nextMask *uint16) {
