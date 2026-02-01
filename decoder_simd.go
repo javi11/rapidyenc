@@ -71,7 +71,7 @@ func decodeSIMD(
 		if verbose {
 			println("offset", alignOffset, len(src))
 		}
-		nSrc, decoded, end, err = decodeGeneric(dest, src[:length], pState)
+		nSrc, decoded, end, err = decodeGeneric(dest, src[:alignOffset], pState)
 		if end != EndNone {
 			return nSrc, decoded, end, err
 		}
