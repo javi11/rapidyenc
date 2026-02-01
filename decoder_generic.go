@@ -206,7 +206,6 @@ done:
 		if c != '\n' && c != '\r' && c != '=' {
 			dest[write] = c - 42
 			write++
-			pos++
 		} else if state != nil {
 			switch c {
 			case '=':
@@ -217,6 +216,7 @@ done:
 				*state = StateNone
 			}
 		}
+		pos++
 	}
 
 	return pos, dest[:write], EndNone, nil
