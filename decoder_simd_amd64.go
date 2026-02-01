@@ -275,7 +275,7 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 			{
 				// lookup compress masks and shuffle
 				lo := archsimd.LoadUint8x16(&compactLUT[mask&0x7fff])
-				hi := archsimd.LoadUint8x16(&compactLUT[(mask>>12)&0x7fff])
+				hi := archsimd.LoadUint8x16(&compactLUT[((mask>>12)&0x7fff0)/16])
 				var shuf archsimd.Uint8x32
 				shuf = shuf.SetLo(lo).SetHi(hi)
 				dataA = dataA.PermuteOrZeroGrouped(shuf.AsInt8x32())
@@ -296,8 +296,8 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				produced += nAhi
 
 				mask >>= 28
-				lo = archsimd.LoadUint8x16(&compactLUT[mask&0x7fff])
-				hi = archsimd.LoadUint8x16(&compactLUT[(mask>>16)&0x7fff])
+				lo = archsimd.LoadUint8x16(&compactLUT[(mask&0x7fff0)/16])
+				hi = archsimd.LoadUint8x16(&compactLUT[((mask>>16)&0x7fff0)/16])
 				shuf = shuf.SetLo(lo).SetHi(hi)
 				dataB = dataB.PermuteOrZeroGrouped(shuf.AsInt8x32())
 				//dataB.AsUint8x32().StoreSlice(dest[produced:])
