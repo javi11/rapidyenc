@@ -38,7 +38,7 @@ func decodeSIMD(
 		dest []byte,
 		src []byte,
 		state *State,
-		kernel func(dest, src []byte, escFirst *uint8, nextMask *uint16) (int, int),
+		kernel func(dest, src []byte, srcLength int, escFirst *uint8, nextMask *uint16) (int, int),
 ) (nSrc int, decoded []byte, end End, err error) {
 	const isRaw = true
 	const searchEnd = true
@@ -159,7 +159,7 @@ func decodeSIMD(
 		if verbose {
 			println("kernel", dLen, "=>", consumed, produced)
 		}
-		c, p := kernel(dest[produced:], src, &escFirst, &nextMask)
+		c, p := kernel(dest[produced:], src, dLen, &escFirst, &nextMask)
 		if verbose {
 			println("kernel done", c, p)
 		}

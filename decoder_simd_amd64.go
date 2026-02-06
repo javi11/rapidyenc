@@ -13,7 +13,7 @@ func decodeAVX2(dest, src []byte, state *State) (nSrc int, decoded []byte, end E
 	return decodeSIMD(64, dest, src, state, decodeSIMDAVX2)
 }
 
-func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consumed, produced int) {
+func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *uint16) (consumed, produced int) {
 	if len(dest) < len(src) {
 		panic("slice y is shorter than slice x")
 	}
@@ -63,12 +63,12 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 	})
 	low4 := archsimd.BroadcastUint8x32(0x0f)
 
-	for ; consumed < len(src); consumed += 32 * 2 {
+	for ; consumed < srcLength; consumed += 32 * 2 {
 		if verbose {
-			println(fmt.Sprintf("%d/%d", consumed, len(src)))
+			println(fmt.Sprintf("%d/%d", consumed, srcLength))
 		}
-		oDataA := archsimd.LoadUint8x32SlicePart(src[consumed:]).AsInt8x32()
-		oDataB := archsimd.LoadUint8x32SlicePart(src[consumed+32:]).AsInt8x32()
+		oDataA := archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32()
+		oDataB := archsimd.LoadUint8x32Slice(src[consumed+32:]).AsInt8x32()
 
 		// A
 		idxA := oDataA.AsUint8x32().
