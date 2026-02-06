@@ -26,8 +26,8 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 	var yencOffset archsimd.Int8x32
 	if *escFirst > 0 {
 		yencOffset = archsimd.LoadInt8x32(&[32]int8{
+			-42 - 64, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
 			-42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
-			-42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42 - 64,
 		})
 	} else {
 		yencOffset = archsimd.BroadcastInt8x32(-42)
@@ -36,13 +36,13 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 	if nextMask != nil && isRaw {
 		if *nextMask == 1 {
 			minMask = archsimd.LoadInt8x32(&[32]int8{
+				0, '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
 				'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
-				'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', 0,
 			})
 		} else if *nextMask == 2 {
 			minMask = archsimd.LoadInt8x32(&[32]int8{
+				'.', 0, '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
 				'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
-				'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', 0, '.',
 			})
 		} else {
 			minMask = archsimd.BroadcastInt8x32('.')
@@ -284,14 +284,14 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				dataA.GetLo().AsUint8x16().StoreSlice(dest[produced:])
 				nAlo := 16 - bits.OnesCount32(uint32(mask&0xffff))
 				if verbose {
-					println(fmt.Sprintf("%02x", produced), nAlo, hex.EncodeToString(dest[produced:produced+16]))
+					println(fmt.Sprintf("%02x", produced), nAlo, hex.EncodeToString(dest[produced:produced+nAlo]))
 				}
 				produced += nAlo
 				//// Store upper 128 bits
 				dataA.GetHi().AsUint8x16().StoreSlice(dest[produced:])
 				nAhi := 16 - bits.OnesCount32(uint32(mask&0xffff0000))
 				if verbose {
-					println(fmt.Sprintf("%02x", produced), nAhi, hex.EncodeToString(dest[produced:produced+16]))
+					println(fmt.Sprintf("%02x", produced), nAhi, hex.EncodeToString(dest[produced:produced+nAhi]))
 				}
 				produced += nAhi
 
@@ -306,14 +306,14 @@ func decodeSIMDAVX2(dest, src []byte, escFirst *uint8, nextMask *uint16) (consum
 				dataB.GetLo().AsUint8x16().StoreSlice(dest[produced:])
 				nBlo := 16 - bits.OnesCount32(uint32(mask&0xffff0))
 				if verbose {
-					println(fmt.Sprintf("%02x", produced), nBlo, hex.EncodeToString(dest[produced:produced+16]))
+					println(fmt.Sprintf("%02x", produced), nBlo, hex.EncodeToString(dest[produced:produced+nBlo]))
 				}
 				produced += nBlo
 				// Store upper 128 bits
 				dataB.GetHi().AsUint8x16().StoreSlice(dest[produced:])
 				nBhi := 16 - bits.OnesCount32(uint32(mask>>20))
 				if verbose {
-					println(fmt.Sprintf("%02x", produced), nBhi, hex.EncodeToString(dest[produced:produced+16]))
+					println(fmt.Sprintf("%02x", produced), nBhi, hex.EncodeToString(dest[produced:produced+nBhi]))
 				}
 				produced += nBhi
 			}

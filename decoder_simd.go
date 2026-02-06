@@ -159,14 +159,14 @@ func decodeSIMD(
 		if verbose {
 			println("kernel", dLen, "=>", consumed, produced)
 		}
-		c, p := kernel(dest[produced:], src[:dLen], &escFirst, &nextMask)
+		c, p := kernel(dest[produced:], src, &escFirst, &nextMask)
 		if verbose {
 			println("kernel done", c, p)
 		}
 		consumed += c
 		produced += p
-		src = src[dLen:]
-		length -= dLen
+		src = src[c:]
+		length -= c
 
 		switch {
 		case escFirst > 0:
