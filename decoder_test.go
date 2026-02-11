@@ -69,7 +69,6 @@ func TestDecodePattern(t *testing.T) {
 
 			dec := NewDecoder(encoded)
 			produced, _, _ := dec.decodeYenc(dst, encoded.Bytes())
-			println(string(dst[:produced]))
 			//b := bytes.NewBuffer(nil)
 			//n, err := io.Copy(b, dec)
 			//require.Equal(t, int64(len(raw)), n)
