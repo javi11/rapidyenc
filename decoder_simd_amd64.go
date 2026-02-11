@@ -3,7 +3,6 @@
 package rapidyenc
 
 import (
-	"encoding/hex"
 	"fmt"
 	"math/bits"
 	"simd/archsimd"
@@ -14,14 +13,15 @@ func decodeAVX2(dest, src []byte, state *State) (nSrc int, decoded []byte, end E
 }
 
 func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *uint16) (consumed, produced int) {
-	if len(dest) < len(src) {
+	if len(dest) < srcLength {
 		panic("slice y is shorter than slice x")
 	}
 
 	// TODO: need this?
 	isRaw := true
 	searchEnd := true
-	verbose := false
+
+	neg42 := archsimd.BroadcastInt8x32(-42)
 
 	var yencOffset archsimd.Int8x32
 	if *escFirst > 0 {
@@ -30,7 +30,7 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 			-42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
 		})
 	} else {
-		yencOffset = archsimd.BroadcastInt8x32(-42)
+		yencOffset = neg42
 	}
 	var minMask archsimd.Int8x32
 	if nextMask != nil && isRaw {
@@ -64,9 +64,6 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 	low4 := archsimd.BroadcastUint8x32(0x0f)
 
 	for ; consumed < srcLength; consumed += 32 * 2 {
-		if verbose {
-			println(fmt.Sprintf("%d/%d", consumed, srcLength))
-		}
 		oDataA := archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32()
 		oDataB := archsimd.LoadUint8x32Slice(src[consumed+32:]).AsInt8x32()
 
@@ -86,12 +83,6 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 
 		// Build 64-bit mask
 		mask := uint64(cmpB.ToBits())<<32 + uint64(cmpA.ToBits())
-
-		if mask > 0 {
-			if verbose {
-				println("mask", consumed, mask, fmt.Sprintf("%064b", mask))
-			}
-		}
 
 		var dataA, dataB archsimd.Int8x32
 		if mask != 0 {
@@ -242,7 +233,6 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 						4, 4, 4, 4, 5, 5, 5, 5,
 						6, 6, 6, 6, 7, 7, 7, 7,
 					})).And(bitMask).Equal(bitMask).ToInt8x32()
-					neg42 := archsimd.BroadcastInt8x32(-42)
 					neg106 := archsimd.BroadcastInt8x32(-42 - 64)
 					dataA = oDataA.Add(neg106.Merge(yencOffset, vMaskEqA.ToMask()))
 					dataB = oDataB.Add(neg106.Merge(neg42, vMaskEqB.ToMask()))
@@ -259,7 +249,7 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 						).Equal(archsimd.BroadcastUint8x32(0xff)),
 					)
 					vecB := archsimd.BroadcastInt8x32(-42-64).Merge(
-						archsimd.BroadcastInt8x32(-42),
+						neg42,
 						archsimd.BroadcastInt8x32('=').Equal(archsimd.LoadUint8x32Slice(src[consumed-1+32:]).AsInt8x32()),
 					)
 					dataA = oDataA.Add(vecA)
@@ -267,71 +257,48 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 				}
 			}
 
-			//{
-			yencOffset = makeYencOffset(*escFirst)
-			//}
+			if *escFirst > 0 {
+				yencOffset = archsimd.LoadInt8x32(&[32]int8{
+					-42 - 64, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
+					-42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
+				})
+			} else {
+				yencOffset = neg42
+			}
 
-			//XMM_SIZE := 16
 			{
 				// lookup compress masks and shuffle
-				lo := archsimd.LoadUint8x16(&compactLUT[mask&0x7fff])
-				hi := archsimd.LoadUint8x16(&compactLUT[((mask>>12)&0x7fff0)/16])
-				var shuf archsimd.Uint8x32
-				shuf = shuf.SetLo(lo).SetHi(hi)
-				dataA = dataA.PermuteOrZeroGrouped(shuf.AsInt8x32())
-				//dataA.AsUint8x32().StoreSlice(dest[produced:])
+				dataA = dataA.PermuteOrZeroGrouped(new(archsimd.Uint8x32).
+					SetLo(archsimd.LoadUint8x16(&compactLUT[mask&0x7fff])).
+					SetHi(archsimd.LoadUint8x16(&compactLUT[((mask>>12)&0x7fff0)/16])).
+					AsInt8x32())
 				// Store lower 128 bits
 				dataA.GetLo().AsUint8x16().StoreSlice(dest[produced:])
-				nAlo := 16 - bits.OnesCount32(uint32(mask&0xffff))
-				if verbose {
-					println(fmt.Sprintf("%02x", produced), nAlo, hex.EncodeToString(dest[produced:produced+nAlo]))
-				}
-				produced += nAlo
-				//// Store upper 128 bits
+				produced += 16 - bits.OnesCount64(mask&0xffff)
+				// Store upper 128 bits
 				dataA.GetHi().AsUint8x16().StoreSlice(dest[produced:])
-				nAhi := 16 - bits.OnesCount32(uint32(mask&0xffff0000))
-				if verbose {
-					println(fmt.Sprintf("%02x", produced), nAhi, hex.EncodeToString(dest[produced:produced+nAhi]))
-				}
-				produced += nAhi
+				produced += 16 - bits.OnesCount64(mask&0xffff0000)
 
 				mask >>= 28
-				lo = archsimd.LoadUint8x16(&compactLUT[(mask&0x7fff0)/16])
-				hi = archsimd.LoadUint8x16(&compactLUT[((mask>>16)&0x7fff0)/16])
-				shuf = shuf.SetLo(lo).SetHi(hi)
-				dataB = dataB.PermuteOrZeroGrouped(shuf.AsInt8x32())
-				//dataB.AsUint8x32().StoreSlice(dest[produced:])
-				//produced += nB
+				dataB = dataB.PermuteOrZeroGrouped(new(archsimd.Uint8x32).
+					SetLo(archsimd.LoadUint8x16(&compactLUT[(mask&0x7fff0)/16])).
+					SetHi(archsimd.LoadUint8x16(&compactLUT[((mask>>16)&0x7fff0)/16])).
+					AsInt8x32())
 				// Store lower 128 bits
 				dataB.GetLo().AsUint8x16().StoreSlice(dest[produced:])
-				nBlo := 16 - bits.OnesCount32(uint32(mask&0xffff0))
-				if verbose {
-					println(fmt.Sprintf("%02x", produced), nBlo, hex.EncodeToString(dest[produced:produced+nBlo]))
-				}
-				produced += nBlo
+				produced += 16 - bits.OnesCount64(mask&0xffff0)
 				// Store upper 128 bits
 				dataB.GetHi().AsUint8x16().StoreSlice(dest[produced:])
-				nBhi := 16 - bits.OnesCount32(uint32(mask>>20))
-				if verbose {
-					println(fmt.Sprintf("%02x", produced), nBhi, hex.EncodeToString(dest[produced:produced+nBhi]))
-				}
-				produced += nBhi
-			}
-			if verbose {
-				println("long")
+				produced += 16 - bits.OnesCount64(mask>>20)
 			}
 		} else {
-			if verbose {
-				println("short", mask, fmt.Sprintf("%02x", produced))
-			}
-			// if(use_isa < ISA_LEVEL_AVX3)
 			dataA = oDataA.Add(yencOffset)
-			dataB = oDataB.Add(archsimd.BroadcastInt8x32(-42))
+			dataB = oDataB.Add(neg42)
 			dataA.AsUint8x32().StoreSlice(dest[produced:])
 			dataB.AsUint8x32().StoreSlice(dest[produced+32:])
 			produced += 2 * 32
 			*escFirst = 0
-			yencOffset = archsimd.BroadcastInt8x32(-42)
+			yencOffset = neg42
 		}
 	}
 	return consumed, produced
@@ -361,20 +328,6 @@ func decoder_set_nextMask(isRaw bool, src []byte, position int, nextMask *uint16
 	} else {
 		*nextMask = 0
 	}
-}
-
-func makeYencOffset(escFirst uint8) archsimd.Int8x32 {
-	base := archsimd.BroadcastInt8x32(-42)
-
-	if escFirst == 0 {
-		return base
-	}
-
-	// Build a vector with 0x40 in byte 0, zero elsewhere
-	var tmp [32]uint8
-	tmp[0] = 0x40
-
-	return base.Xor(archsimd.LoadUint8x32(&tmp).AsInt8x32())
 }
 
 // without backtracking
