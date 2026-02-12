@@ -4,34 +4,8 @@ package rapidyenc
 
 import (
 	"bytes"
-	"sync"
 	"unsafe"
 )
-
-var (
-	compactLUT [32768][16]byte
-	initLUT    sync.Once
-)
-
-func maybeInitLUT() {
-	initLUT.Do(func() {
-		const tableSize = 16
-		for i := range compactLUT {
-			k := i
-			p := 0
-			for j := range tableSize {
-				if (k & 1) == 0 {
-					compactLUT[i][p] = byte(j)
-					p++
-				}
-				k >>= 1
-			}
-			for ; p < tableSize; p++ {
-				compactLUT[i][p] = 0x80
-			}
-		}
-	})
-}
 
 func decodeSIMD(
 		width int,

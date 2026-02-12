@@ -3,10 +3,38 @@
 package rapidyenc
 
 import (
-	"fmt"
 	"math/bits"
 	"simd/archsimd"
 )
+
+var (
+	compactLUT [32768][16]byte
+	decode     func(dest, src []byte, state *State) (nSrc int, decoded []byte, end End, err error)
+)
+
+func init() {
+	const tableSize = 16
+	for i := range compactLUT {
+		k := i
+		p := 0
+		for j := range tableSize {
+			if (k & 1) == 0 {
+				compactLUT[i][p] = byte(j)
+				p++
+			}
+			k >>= 1
+		}
+		for ; p < tableSize; p++ {
+			compactLUT[i][p] = 0x80
+		}
+	}
+
+	if archsimd.X86.AVX2() {
+		decode = decodeAVX2
+	} else {
+		decode = decodeGeneric
+	}
+}
 
 func decodeAVX2(dest, src []byte, state *State) (nSrc int, decoded []byte, end End, err error) {
 	return decodeSIMD(64, dest, src, state, decodeSIMDAVX2)
@@ -52,7 +80,7 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 	}
 
 	// set this before the loop because we can't check src after it's been overwritten
-	decoder_set_nextMask(isRaw, src, consumed, nextMask)
+	decoderSetNextMask(isRaw, src, consumed, nextMask)
 
 	// search for special chars
 	lut := archsimd.LoadInt8x32(&[32]int8{
@@ -162,7 +190,7 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 							// terminator found
 							// there's probably faster ways to do this, but reverting to scalar code should be good enough
 							//consumed += consumed
-							*nextMask = decoder_set_nextMask2(isRaw, src, consumed, uint16(mask))
+							*nextMask = decoderSetNextMask2(isRaw, src, consumed, uint16(mask))
 							break
 						}
 					}
@@ -192,8 +220,7 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 							endFound = a.Or(b).ToBits() > 0
 						}
 						if endFound {
-							//consumed += consumed
-							*nextMask = decoder_set_nextMask2(isRaw, src, consumed, uint16(mask))
+							*nextMask = decoderSetNextMask2(isRaw, src, consumed, uint16(mask))
 							break
 						}
 					}
@@ -207,7 +234,7 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 
 			maskEqShift1 := (maskEq << 1) + uint64(*escFirst)
 			if mask&maskEqShift1 != 0 {
-				maskEq = fix_eqMask(maskEq, maskEqShift1)
+				maskEq = fixEqMask(maskEq, maskEqShift1)
 				mask &= ^uint64(*escFirst)
 				*escFirst = uint8(maskEq >> 63)
 				// next, eliminate anything following a `=` from the special char mask; this eliminates cases of `=\r` so that they aren't removed
@@ -304,17 +331,7 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 	return consumed, produced
 }
 
-func printHex32(label string, shuf archsimd.Uint8x32) {
-	print(label + " ")
-	var tmp [8]uint32
-	shuf.AsUint32x8().Store(&tmp)
-	for i := 0; i < 8; i++ {
-		print(fmt.Sprintf("\\x%08x", tmp[i]))
-	}
-	println()
-}
-
-func decoder_set_nextMask(isRaw bool, src []byte, position int, nextMask *uint16) {
+func decoderSetNextMask(isRaw bool, src []byte, position int, nextMask *uint16) {
 	if isRaw {
 		if position > 0 { // have to gone through at least one loop cycle
 			if position >= 2 && src[position-2] == '\r' && src[position-1] == '\n' && src[position] == '.' {
@@ -331,7 +348,7 @@ func decoder_set_nextMask(isRaw bool, src []byte, position int, nextMask *uint16
 }
 
 // without backtracking
-func decoder_set_nextMask2(isRaw bool, src []byte, position int, mask uint16) uint16 {
+func decoderSetNextMask2(isRaw bool, src []byte, position int, mask uint16) uint16 {
 	if isRaw {
 		if src[position] == '.' {
 			return mask & 1
@@ -345,7 +362,7 @@ func decoder_set_nextMask2(isRaw bool, src []byte, position int, mask uint16) ui
 
 // resolve invalid sequences of = to deal with cases like '===='
 // bit hack inspired from simdjson: https://youtu.be/wlvKAT7SZIQ?t=33m38s
-func fix_eqMask(mask, maskShift1 uint64) uint64 {
+func fixEqMask(mask, maskShift1 uint64) uint64 {
 	// isolate the start of each consecutive bit group (e.g. 01011101 -> 01000101)
 	start := mask & ^maskShift1
 
@@ -363,14 +380,11 @@ func fix_eqMask(mask, maskShift1 uint64) uint64 {
 	return (oddGroups ^ even) & mask
 }
 
-// _do_decode_raw
 func decodeIncremental(dst, src []byte, state *State) (int, []byte, End, error) {
 	if state == nil {
 		unusedState := StateCRLF
 		state = &unusedState
 	}
 
-	maybeInitLUT()
-	//return decodeGeneric(dst, src, state)
-	return decodeAVX2(dst, src, state)
+	return decode(dst, src, state)
 }
