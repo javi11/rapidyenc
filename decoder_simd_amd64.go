@@ -1,4 +1,4 @@
-//go:build !cgo && goexperiment.simd && amd64
+//go:build !cgo && goexperiment.simd
 
 package rapidyenc
 
@@ -382,8 +382,7 @@ func fixEqMask(mask, maskShift1 uint64) uint64 {
 
 func decodeIncremental(dst, src []byte, state *State) (int, []byte, End, error) {
 	if state == nil {
-		unusedState := StateCRLF
-		state = &unusedState
+		state = new(StateCRLF)
 	}
 
 	return decode(dst, src, state)

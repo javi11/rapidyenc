@@ -12,8 +12,23 @@ on:
 
 jobs:
   test:
-    name: Test
+    name: Test (${{ matrix.name }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cgo-enabled
+            cgo_enabled: 1
+            goexperiment: ""
+          - name: no-cgo-simd
+            cgo_enabled: 0
+            goexperiment: simd
+          - name: no-cgo
+            cgo_enabled: 0
+            goexperiment: ""
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,12 +40,15 @@ jobs:
 
       - name: Run tests
         env:
-          GOEXPERIMENT: simd
-          CGO_ENABLED: 0
-        run: go run gotest.tools/gotestsum@latest --junitfile unit-tests.xml --format pkgname -- ./...
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
+          GOEXPERIMENT: ${{ matrix.goexperiment }}
+        run: |
+          go run gotest.tools/gotestsum@latest \
+            --junitfile unit-tests-${{ matrix.name }}.xml \
+            --format pkgname \
+            -- ./...
 
       - name: Test Summary
         uses: test-summary/action@v2
         with:
           paths: "unit-tests.xml"
-        if: always()
