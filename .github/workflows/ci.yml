@@ -51,4 +51,4 @@ jobs:
       - name: Test Summary
         uses: test-summary/action@v2
         with:
-          paths: "unit-tests.xml"
+          paths: "unit-tests-*.xml"
