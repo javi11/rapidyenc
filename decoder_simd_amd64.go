@@ -40,6 +40,60 @@ func decodeAVX2(dest, src []byte, state *State) (nSrc int, decoded []byte, end E
 	return decodeSIMD(64, dest, src, state, decodeSIMDAVX2)
 }
 
+var (
+	specialLut                                                                    archsimd.Int8x32
+	broadcastEscapeFirst, broadcastNeg42, broadcastNeg106                         archsimd.Int8x32
+	broadcastDOT, broadcastEQ, broadcastCR, broadcastLF, broadcastY, broadcastEQY archsimd.Int8x32
+	minMask1, minMask2                                                            archsimd.Int8x32
+	permuteA, permuteB                                                            archsimd.Int8x32
+	permuteBitMask                                                                archsimd.Mask8x32
+)
+
+func init() {
+	broadcastEscapeFirst = archsimd.LoadInt8x32(&[32]int8{
+		-42 - 64, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
+		-42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
+	})
+
+	// search for special chars
+	specialLut = archsimd.LoadInt8x32(&[32]int8{
+		// lower 128‑bit lane (elements 0..15)
+		'.', -1, -1, -1, -1, -1, -1, -1, -1, -1, '\n', -1, -1, '\r', '=', -1,
+		// upper 128‑bit lane (elements 16..31), same pattern
+		'.', -1, -1, -1, -1, -1, -1, -1, -1, -1, '\n', -1, -1, '\r', '=', -1,
+	})
+
+	minMask1 = archsimd.LoadInt8x32(&[32]int8{
+		0, '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
+		'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
+	})
+	minMask2 = archsimd.LoadInt8x32(&[32]int8{
+		'.', 0, '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
+		'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
+	})
+	permuteA = archsimd.LoadInt8x32(&[32]int8{
+		0, 0, 0, 0, 1, 1, 1, 1,
+		2, 2, 2, 2, 3, 3, 3, 3,
+		0, 0, 0, 0, 1, 1, 1, 1,
+		2, 2, 2, 2, 3, 3, 3, 3,
+	})
+	permuteB = archsimd.LoadInt8x32(&[32]int8{
+		4, 4, 4, 4, 5, 5, 5, 5,
+		6, 6, 6, 6, 7, 7, 7, 7,
+		4, 4, 4, 4, 5, 5, 5, 5,
+		6, 6, 6, 6, 7, 7, 7, 7,
+	})
+	permuteBitMask = archsimd.BroadcastUint64x4(0x8040201008040201).AsInt8x32().ToMask()
+	broadcastDOT = archsimd.BroadcastInt8x32('.')
+	broadcastEQ = archsimd.BroadcastInt8x32('=')
+	broadcastNeg42 = archsimd.BroadcastInt8x32(-42)
+	broadcastCR = archsimd.BroadcastInt8x32('\r')
+	broadcastLF = archsimd.BroadcastInt8x32('\n')
+	broadcastEQY = archsimd.BroadcastInt16x16(0x793d).AsInt8x32()
+	broadcastY = archsimd.BroadcastInt8x32('y')
+	broadcastNeg106 = archsimd.BroadcastInt8x32(-42 - 64)
+}
+
 func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *uint16) (consumed, produced int) {
 	if len(dest) < srcLength {
 		panic("slice y is shorter than slice x")
@@ -49,73 +103,45 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 	isRaw := true
 	searchEnd := true
 
-	neg42 := archsimd.BroadcastInt8x32(-42)
-
 	var yencOffset archsimd.Int8x32
 	if *escFirst > 0 {
-		yencOffset = archsimd.LoadInt8x32(&[32]int8{
-			-42 - 64, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
-			-42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
-		})
+		yencOffset = broadcastEscapeFirst
 	} else {
-		yencOffset = neg42
+		yencOffset = broadcastNeg42
 	}
 	var minMask archsimd.Int8x32
 	if nextMask != nil && isRaw {
 		if *nextMask == 1 {
-			minMask = archsimd.LoadInt8x32(&[32]int8{
-				0, '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
-				'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
-			})
+			minMask = minMask1
 		} else if *nextMask == 2 {
-			minMask = archsimd.LoadInt8x32(&[32]int8{
-				'.', 0, '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
-				'.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.', '.',
-			})
+			minMask = minMask2
 		} else {
-			minMask = archsimd.BroadcastInt8x32('.')
+			minMask = broadcastDOT
 		}
 	} else {
-		minMask = archsimd.BroadcastInt8x32('.')
+		minMask = broadcastDOT
 	}
 
 	// set this before the loop because we can't check src after it's been overwritten
 	decoderSetNextMask(isRaw, src, consumed, nextMask)
 
-	// search for special chars
-	lut := archsimd.LoadInt8x32(&[32]int8{
-		// lower 128‑bit lane (elements 0..15)
-		'.', -1, -1, -1, -1, -1, -1, -1, -1, -1, '\n', -1, -1, '\r', '=', -1,
-		// upper 128‑bit lane (elements 16..31), same pattern
-		'.', -1, -1, -1, -1, -1, -1, -1, -1, -1, '\n', -1, -1, '\r', '=', -1,
-	})
-	low4 := archsimd.BroadcastUint8x32(0x0f)
+	var oDataA, oDataB archsimd.Int8x32
+	var cmpA, cmpB archsimd.Mask8x32
+
+	mask := uint64(0)
 
 	for ; consumed < srcLength; consumed += 32 * 2 {
-		oDataA := archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32()
-		oDataB := archsimd.LoadUint8x32Slice(src[consumed+32:]).AsInt8x32()
+		oDataA = archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32()
+		oDataB = archsimd.LoadUint8x32Slice(src[consumed+32:]).AsInt8x32()
 
-		// A
-		idxA := oDataA.AsUint8x32().
-			Min(minMask.AsUint8x32()).
-			And(low4).
-			AsInt8x32()
-		cmpA := oDataA.Equal(lut.PermuteOrZeroGrouped(idxA))
-
-		// B
-		idxB := oDataB.AsUint8x32().
-			Min(archsimd.BroadcastUint8x32('.')).
-			And(low4).
-			AsInt8x32()
-		cmpB := oDataB.Equal(lut.PermuteOrZeroGrouped(idxB))
-
-		// Build 64-bit mask
-		mask := uint64(cmpB.ToBits())<<32 + uint64(cmpA.ToBits())
+		cmpA = oDataA.Equal(specialLut.PermuteOrZeroGrouped(oDataA.AsUint8x32().Min(minMask.AsUint8x32()).AsInt8x32()))
+		cmpB = oDataB.Equal(specialLut.PermuteOrZeroGrouped(oDataB.AsUint8x32().Min(broadcastDOT.AsUint8x32()).AsInt8x32()))
+		mask = uint64(cmpB.ToBits())<<32 | uint64(cmpA.ToBits())
 
 		var dataA, dataB archsimd.Int8x32
 		if mask != 0 {
-			cmpEqA := oDataA.Equal(archsimd.BroadcastInt8x32('='))
-			cmpEqB := oDataB.Equal(archsimd.BroadcastInt8x32('='))
+			cmpEqA := oDataA.Equal(broadcastEQ)
+			cmpEqB := oDataB.Equal(broadcastEQ)
 			maskEq := uint64(cmpEqB.ToBits())<<32 | uint64(cmpEqA.ToBits())
 
 			var match2NlDotA archsimd.Mask8x32
@@ -133,13 +159,13 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 				tmpData2B := archsimd.LoadUint8x32SlicePart(src[consumed+2+32:]).AsInt8x32()
 
 				if searchEnd {
-					match2EqA = archsimd.BroadcastInt8x32('=').Equal(tmpData2A)
-					match2EqB = archsimd.BroadcastInt8x32('=').Equal(tmpData2B)
+					match2EqA = broadcastEQ.Equal(tmpData2A)
+					match2EqB = broadcastEQ.Equal(tmpData2B)
 				}
 				if isRaw {
 					// find patterns of \r_.
-					match2CrXDtA = oDataA.Equal(archsimd.BroadcastInt8x32('\r')).And(tmpData2A.Equal(archsimd.BroadcastInt8x32('.')))
-					match2CrXDtB = oDataB.Equal(archsimd.BroadcastInt8x32('\r')).And(tmpData2B.Equal(archsimd.BroadcastInt8x32('.')))
+					match2CrXDtA = oDataA.Equal(broadcastCR).And(tmpData2A.Equal(broadcastDOT))
+					match2CrXDtB = oDataB.Equal(broadcastCR).And(tmpData2B.Equal(broadcastDOT))
 					partialKillDotFound = match2CrXDtA.Or(match2CrXDtB).ToBits()
 				}
 
@@ -148,11 +174,11 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 
 				if isRaw && partialKillDotFound > 0 {
 					// merge matches for \r\n.
-					match1LfA := archsimd.BroadcastInt8x32('\n').Equal(archsimd.LoadUint8x32Slice(src[consumed+1:]).AsInt8x32())
-					match1LfB := archsimd.BroadcastInt8x32('\n').Equal(archsimd.LoadUint8x32Slice(src[consumed+1+32:]).AsInt8x32())
+					match1LfA := broadcastLF.Equal(archsimd.LoadUint8x32Slice(src[consumed+1:]).AsInt8x32())
+					match1LfB := broadcastLF.Equal(archsimd.LoadUint8x32Slice(src[consumed+1+32:]).AsInt8x32())
 					// force re-computing these to avoid register spills elsewhere
-					match1NlA = match1LfA.And(archsimd.BroadcastInt8x32('\r').Equal(archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32()))
-					match1NlB = match1LfB.And(archsimd.BroadcastInt8x32('\r').Equal(archsimd.LoadUint8x32Slice(src[consumed+32:]).AsInt8x32()))
+					match1NlA = match1LfA.And(broadcastCR.Equal(archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32()))
+					match1NlB = match1LfB.And(broadcastCR.Equal(archsimd.LoadUint8x32Slice(src[consumed+32:]).AsInt8x32()))
 					match2NlDotA = match2CrXDtA.And(match1NlA)
 					match2NlDotB = match2CrXDtB.And(match1NlB)
 
@@ -160,17 +186,17 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 						tmpData4A := archsimd.LoadUint8x32Slice(src[consumed+4:]).AsInt8x32()
 						tmpData4B := archsimd.LoadUint8x32Slice(src[consumed+4+32:]).AsInt8x32()
 						// match instances of \r\n.\r\n and \r\n.=y
-						match3CrA := archsimd.BroadcastInt8x32('\r').Equal(archsimd.LoadUint8x32Slice(src[consumed+3:]).AsInt8x32())
-						match3CrB := archsimd.BroadcastInt8x32('\r').Equal(archsimd.LoadUint8x32Slice(src[consumed+3+32:]).AsInt8x32())
-						match4LfA := tmpData4A.Equal(archsimd.BroadcastInt8x32('\n'))
-						match4LfB := tmpData4B.Equal(archsimd.BroadcastInt8x32('\n'))
-						match4EqYA := tmpData4A.Equal(archsimd.BroadcastInt16x16(0x793d).AsInt8x32()) // =y
-						match4EqYB := tmpData4B.Equal(archsimd.BroadcastInt16x16(0x793d).AsInt8x32()) // =y
+						match3CrA := broadcastCR.Equal(archsimd.LoadUint8x32Slice(src[consumed+3:]).AsInt8x32())
+						match3CrB := broadcastCR.Equal(archsimd.LoadUint8x32Slice(src[consumed+3+32:]).AsInt8x32())
+						match4LfA := tmpData4A.Equal(broadcastLF)
+						match4LfB := tmpData4B.Equal(broadcastLF)
+						match4EqYA := tmpData4A.Equal(broadcastEQY) // =y
+						match4EqYB := tmpData4B.Equal(broadcastEQY) // =y
 
 						var matchEnd uint32
 						{
-							match3EqYA := match2EqA.And(archsimd.BroadcastInt8x32('y').Equal(archsimd.LoadUint8x32Slice(src[consumed+3:]).AsInt8x32()))
-							match3EqYB := match2EqB.And(archsimd.BroadcastInt8x32('y').Equal(archsimd.LoadUint8x32Slice(src[consumed+3+32:]).AsInt8x32()))
+							match3EqYA := match2EqA.And(broadcastY.Equal(archsimd.LoadUint8x32Slice(src[consumed+3:]).AsInt8x32()))
+							match3EqYB := match2EqB.And(broadcastY.Equal(archsimd.LoadUint8x32Slice(src[consumed+3+32:]).AsInt8x32()))
 							match4EqYA = match4EqYA.ToInt8x32().AsInt16x16().ShiftAllLeft(8).AsInt8x32().ToMask()
 							match4EqYB = match4EqYB.ToInt8x32().AsInt16x16().ShiftAllLeft(8).AsInt8x32().ToMask()
 							// merge \r\n and =y matches for tmpData4
@@ -198,14 +224,14 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 						mask |= uint64(match2NlDotA.ToBits()) << 2
 						mask |= uint64(match2NlDotB.ToBits()) << 34
 						match2NlDotB := match2NlDotB.ToInt8x32().GetHi().AsInt32x4().ShiftAllLeft(14).AsInt8x16().ExtendToInt16().AsInt8x32()
-						minMask = archsimd.BroadcastInt8x32('.').SubSaturated(match2NlDotB)
+						minMask = broadcastDOT.SubSaturated(match2NlDotB)
 					}
 				} else if searchEnd {
 					partialEndFound := false
 					var match3EqYA, match3EqYB archsimd.Mask8x32
 					{
-						match3YA := archsimd.BroadcastInt8x32('y').Equal(archsimd.LoadUint8x32Slice(src[consumed+3:]).AsInt8x32())
-						match3YB := archsimd.BroadcastInt8x32('y').Equal(archsimd.LoadUint8x32SlicePart(src[consumed+3+32:]).AsInt8x32())
+						match3YA := broadcastY.Equal(archsimd.LoadUint8x32Slice(src[consumed+3:]).AsInt8x32())
+						match3YB := broadcastY.Equal(archsimd.LoadUint8x32SlicePart(src[consumed+3+32:]).AsInt8x32())
 						match3EqYA = match2EqA.And(match3YA)
 						match3EqYB = match2EqB.And(match3YB)
 						partialEndFound = match3EqYA.Or(match3EqYB).ToBits() > 0
@@ -213,10 +239,10 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 					if partialEndFound {
 						endFound := false
 						{
-							match1LfA := archsimd.BroadcastInt8x32('\n').Equal(archsimd.LoadUint8x32Slice(src[consumed+1:]).AsInt8x32())
-							match1LfB := archsimd.BroadcastInt8x32('\n').Equal(archsimd.LoadUint8x32SlicePart(src[consumed+1+32:]).AsInt8x32())
-							a := match3EqYA.And(match1LfA.And(archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32().Equal(archsimd.BroadcastInt8x32('\r'))))
-							b := match3EqYB.And(match1LfB.And(archsimd.LoadUint8x32SlicePart(src[consumed+32:]).AsInt8x32().Equal(archsimd.BroadcastInt8x32('\r'))))
+							match1LfA := broadcastLF.Equal(archsimd.LoadUint8x32Slice(src[consumed+1:]).AsInt8x32())
+							match1LfB := broadcastLF.Equal(archsimd.LoadUint8x32SlicePart(src[consumed+1+32:]).AsInt8x32())
+							a := match3EqYA.And(match1LfA.And(archsimd.LoadUint8x32Slice(src[consumed:]).AsInt8x32().Equal(broadcastCR)))
+							b := match3EqYB.And(match1LfB.And(archsimd.LoadUint8x32SlicePart(src[consumed+32:]).AsInt8x32().Equal(broadcastCR)))
 							endFound = a.Or(b).ToBits() > 0
 						}
 						if endFound {
@@ -225,10 +251,10 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 						}
 					}
 					if isRaw {
-						minMask = archsimd.BroadcastInt8x32('.')
+						minMask = broadcastDOT
 					}
 				} else if isRaw {
-					minMask = archsimd.BroadcastInt8x32('.')
+					minMask = broadcastDOT
 				}
 			}
 
@@ -244,40 +270,26 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 				// unescape chars following `=`
 				{
 					// convert maskEq into vector form (i.e. reverse pmovmskb)
-					// Wants SSE for _mm256_broadcastq_epi64(_mm_cvtsi64_si128(maskEq))
-					vMaskEq := archsimd.BroadcastUint64x4(maskEq)
-					vMaskEqBytes := vMaskEq.AsUint8x32()
-					bitMask := archsimd.BroadcastUint64x4(0x8040201008040201).AsUint8x32()
-					vMaskEqA := vMaskEqBytes.PermuteOrZeroGrouped(archsimd.LoadInt8x32(&[32]int8{
-						0, 0, 0, 0, 1, 1, 1, 1,
-						2, 2, 2, 2, 3, 3, 3, 3,
-						0, 0, 0, 0, 1, 1, 1, 1,
-						2, 2, 2, 2, 3, 3, 3, 3,
-					})).And(bitMask).Equal(bitMask).ToInt8x32()
-					vMaskEqB := vMaskEqBytes.PermuteOrZeroGrouped(archsimd.LoadInt8x32(&[32]int8{
-						4, 4, 4, 4, 5, 5, 5, 5,
-						6, 6, 6, 6, 7, 7, 7, 7,
-						4, 4, 4, 4, 5, 5, 5, 5,
-						6, 6, 6, 6, 7, 7, 7, 7,
-					})).And(bitMask).Equal(bitMask).ToInt8x32()
-					neg106 := archsimd.BroadcastInt8x32(-42 - 64)
-					dataA = oDataA.Add(neg106.Merge(yencOffset, vMaskEqA.ToMask()))
-					dataB = oDataB.Add(neg106.Merge(neg42, vMaskEqB.ToMask()))
+					vMaskEqBytes := archsimd.BroadcastUint64x4(maskEq).AsUint8x32()
+					vMaskEqA := vMaskEqBytes.PermuteOrZeroGrouped(permuteA).Masked(permuteBitMask).AsInt8x32().ToMask()
+					vMaskEqB := vMaskEqBytes.PermuteOrZeroGrouped(permuteB).Masked(permuteBitMask).AsInt8x32().ToMask()
+					dataA = oDataA.Add(broadcastNeg106.Merge(yencOffset, vMaskEqA))
+					dataB = oDataB.Add(broadcastNeg106.Merge(broadcastNeg42, vMaskEqB))
 				}
 			} else {
 				*escFirst = uint8(maskEq >> 63)
 
 				{
-					vecA := archsimd.BroadcastInt8x32(-42-64).Merge(
+					vecA := broadcastNeg106.Merge(
 						yencOffset,
 						cmpEqA.ToInt8x32().AsUint8x32().ConcatShiftBytesRightGrouped(
 							15,
 							archsimd.BroadcastInt8x32('=').SetHi(cmpEqA.ToInt8x32().GetLo()).AsUint8x32(),
 						).Equal(archsimd.BroadcastUint8x32(0xff)),
 					)
-					vecB := archsimd.BroadcastInt8x32(-42-64).Merge(
-						neg42,
-						archsimd.BroadcastInt8x32('=').Equal(archsimd.LoadUint8x32Slice(src[consumed-1+32:]).AsInt8x32()),
+					vecB := broadcastNeg106.Merge(
+						broadcastNeg42,
+						broadcastEQ.Equal(archsimd.LoadUint8x32Slice(src[consumed-1+32:]).AsInt8x32()),
 					)
 					dataA = oDataA.Add(vecA)
 					dataB = oDataB.Add(vecB)
@@ -285,12 +297,9 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 			}
 
 			if *escFirst > 0 {
-				yencOffset = archsimd.LoadInt8x32(&[32]int8{
-					-42 - 64, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
-					-42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42, -42,
-				})
+				yencOffset = broadcastEscapeFirst
 			} else {
-				yencOffset = neg42
+				yencOffset = broadcastNeg42
 			}
 
 			{
@@ -320,12 +329,12 @@ func decodeSIMDAVX2(dest, src []byte, srcLength int, escFirst *uint8, nextMask *
 			}
 		} else {
 			dataA = oDataA.Add(yencOffset)
-			dataB = oDataB.Add(neg42)
+			dataB = oDataB.Add(broadcastNeg42)
 			dataA.AsUint8x32().StoreSlice(dest[produced:])
 			dataB.AsUint8x32().StoreSlice(dest[produced+32:])
 			produced += 2 * 32
 			*escFirst = 0
-			yencOffset = neg42
+			yencOffset = broadcastNeg42
 		}
 	}
 	return consumed, produced
