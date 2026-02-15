@@ -32,12 +32,18 @@ type Decoder struct {
 
 	// remainder contains bytes that have been read from r but were not sufficient to copy out via Read
 	remainder []byte
+	// readBuf is a separate buffer for reading from r, avoiding in-place decode
+	// which constrains SIMD optimizations (partial stores corrupt unread src data).
+	readBuf []byte
 }
+
+const defaultReadBufSize = 128 * 1024
 
 func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{
-		r:    r,
-		hash: crc32.NewIEEE(),
+		r:       r,
+		hash:    crc32.NewIEEE(),
+		readBuf: make([]byte, defaultReadBufSize),
 	}
 }
 
@@ -53,26 +59,35 @@ func (d *Decoder) Read(p []byte) (int, error) {
 		return 0, d.metaError()
 	}
 
-	// Restore previously read data
-	if len(p) < len(d.remainder) {
-		return 0, fmt.Errorf("[rapidyenc] remainder larger than reader: %d < %d", len(p), len(d.remainder))
+	// Read into separate buffer to avoid in-place decode constraints.
+	// This allows SIMD to use partial stores without corrupting unread src data.
+	// We limit the read to len(p) so DecodeIncremental's len(dst) >= len(src) holds.
+	readBuf := d.readBuf
+	readLimit := len(p)
+	if len(readBuf) < readLimit {
+		readBuf = make([]byte, readLimit)
+		d.readBuf = readBuf
 	}
-	nremainder := copy(p, d.remainder)
+
+	// Restore previously read data into readBuf
+	if readLimit < len(d.remainder) {
+		return 0, fmt.Errorf("[rapidyenc] remainder larger than reader: %d < %d", readLimit, len(d.remainder))
+	}
+	nremainder := copy(readBuf, d.remainder)
 	d.remainder = d.remainder[nremainder:]
 
-	// Use p as scratch space
 	var n int
-	n, d.err = d.r.Read(p[nremainder:])
-	p = p[:n+nremainder]
+	n, d.err = d.r.Read(readBuf[nremainder:readLimit])
+	src := readBuf[:n+nremainder]
 	dst := p
 
 	var decoded int
 	if d.body && d.format == FormatYenc {
-		nd, ns, err := d.decodeYenc(dst, p)
+		nd, ns, err := d.decodeYenc(dst, src)
 		if err != nil {
 			return nd, err
 		}
-		p = p[ns:]
+		src = src[ns:]
 		dst = dst[nd:]
 		decoded += nd
 	}
@@ -80,11 +95,11 @@ func (d *Decoder) Read(p []byte) (int, error) {
 	// Line by line processing
 	if !d.body {
 		for {
-			line, after, found := bytes.Cut(p, []byte("\r\n"))
+			line, after, found := bytes.Cut(src, []byte("\r\n"))
 			if !found {
 				break
 			}
-			p = after
+			src = after
 
 			if bytes.Equal(line, []byte(".")) {
 				d.err = io.EOF
@@ -98,8 +113,8 @@ func (d *Decoder) Read(p []byte) (int, error) {
 			if d.format == FormatYenc {
 				d.processYenc(line)
 				if d.body {
-					nd, ns, err := d.decodeYenc(dst, p)
-					p = p[ns:]
+					nd, ns, err := d.decodeYenc(dst, src)
+					src = src[ns:]
 					dst = dst[nd:]
 					decoded += nd
 					if err != nil {
@@ -121,7 +136,7 @@ func (d *Decoder) Read(p []byte) (int, error) {
 	}
 
 	// Save remainder; small amount of data that doesn't have \r\n
-	d.remainder = append(d.remainder, p...)
+	d.remainder = append(d.remainder[:0], src...)
 
 	if d.err == io.EOF {
 		return decoded, d.metaError()

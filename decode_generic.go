@@ -239,12 +239,13 @@ mainLoop:
 			}
 			continue
 		default:
-			// SIMD fast path: process multiple non-special bytes at once
+			// SIMD fast path: process multiple non-special bytes at once.
+			// decodeFast handles = escapes inline, only stops at \r/\n.
 			if useSIMDDecode {
-				n := decodeFast(dst[p:], src[i:sLen-2])
-				if n > 0 {
-					p += n
-					i += n
+				nDst, nSrc := decodeFast(dst[p:], src[i:sLen-2])
+				if nSrc > 0 {
+					p += nDst
+					i += nSrc
 					continue
 				}
 			}

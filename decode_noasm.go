@@ -6,4 +6,4 @@ package rapidyenc
 var useSIMDDecode = false
 
 // decodeFast is a no-op stub on platforms without SIMD.
-func decodeFast(dst, src []byte) int { return 0 }
+func decodeFast(dst, src []byte) (nDst int, nSrc int) { return 0, 0 }

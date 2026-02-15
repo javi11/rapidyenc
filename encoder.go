@@ -152,6 +152,11 @@ func (e *Encoder) Close() error {
 	}
 	defer func() { e.w = nil }()
 
+	// Wait for any pending hash goroutines to complete before reading Sum32
+	if err := e.hashErrs.Wait(); err != nil {
+		return err
+	}
+
 	if len(e.endByte) > 0 {
 		if _, err := e.w.Write([]byte{'=', e.endByte[0] + 64}); err != nil {
 			return err

@@ -1,25 +1,29 @@
 #include "textflag.h"
 
-// func decodeFast(dst, src []byte) int
+// func decodeFast(dst, src []byte) (int, int)
 //
 // NEON yEnc decoder: subtracts 42 from each byte in 16-byte SIMD chunks.
-// Stops at any special byte (\r, \n, =) and returns the count of
-// clean bytes decoded. Uses partial-chunk optimization: when a special
-// is found mid-chunk, stores the clean prefix before it.
+// Handles = escape sequences inline (consuming 2 src bytes, writing 1 dst byte).
+// Stops only at \r or \n (which require Go state machine for EndControl/dot-unstuffing).
+//
+// Returns (nDst, nSrc) where nDst = bytes written to dst, nSrc = bytes consumed from src.
+// nSrc >= nDst because = escapes consume 2 src bytes per 1 dst byte.
 //
 // Register allocation:
 //   R0 = dst write pointer (advances)
 //   R1 = src read pointer (advances)
 //   R2 = remaining src bytes (decrements)
-//   R4 = bytes processed accumulator
-//   R6-R8 = temporaries
-//   V0 = data, V1-V4 = comparisons
+//   R4 = dst bytes written accumulator
+//   R5 = src bytes consumed accumulator
+//   R6-R9 = temporaries
+//   V0 = data, V1-V3 = comparisons, V4 = combined mask
 //   V20 = splat(\r), V21 = splat(\n), V22 = splat(=), V23 = splat(42)
-TEXT ·decodeFast(SB), NOSPLIT, $0-56
+TEXT ·decodeFast(SB), NOSPLIT, $0-64
 	MOVD dst_base+0(FP), R0
 	MOVD src_base+24(FP), R1
 	MOVD src_len+32(FP), R2
-	MOVD $0, R4                  // n = 0
+	MOVD $0, R4                  // nDst = 0
+	MOVD $0, R5                  // nSrc = 0
 
 	// Set up constant vectors
 	VMOVI $13, V20.B16           // \r
@@ -54,19 +58,18 @@ simd_loop:
 	ADD  $16, R0
 	ADD  $16, R1
 	ADD  $16, R4
+	ADD  $16, R5
 	SUB  $16, R2
 	B    simd_loop
 
 has_specials:
 	// Special byte found in this chunk.
-	// Fall through to byte_tail to process bytes one at a time.
-	// We do NOT store a partial 16-byte SIMD result because when
-	// dst and src share the same buffer (in-place decoding), the
-	// extra bytes past the clean prefix would corrupt unread source data.
+	// Fall through to byte_tail which handles = inline and stops at \r/\n.
 	B    byte_tail
 
 byte_tail:
-	// Process remaining bytes one at a time, stop at any special
+	// Process bytes one at a time.
+	// Handle = escapes inline, stop only at \r or \n.
 	CBZ  R2, done
 	MOVBU (R1), R6
 	CMP  $13, R6                 // \r?
@@ -74,16 +77,39 @@ byte_tail:
 	CMP  $10, R6                 // \n?
 	BEQ  done
 	CMP  $61, R6                 // =?
-	BEQ  done
+	BEQ  handle_eq
 
+	// Normal byte: subtract 42 and store
 	SUB  $42, R6, R6
 	MOVB R6, (R0)
 	ADD  $1, R0
 	ADD  $1, R4
 	ADD  $1, R1
+	ADD  $1, R5
 	SUB  $1, R2
-	B    byte_tail
+	B    simd_loop               // try SIMD again after processing bytes
+
+handle_eq:
+	// = found: consume = and decode the next byte with -42-64
+	CMP  $2, R2                  // need at least 2 bytes (= + escaped)
+	BLT  done                    // not enough data, return to Go
+	MOVBU 1(R1), R6              // load byte after =
+	// If escaped byte is \r or \n, bail to Go — these are extremely rare
+	// but the state machine needs to see them for proper CRLF handling.
+	CMP  $13, R6
+	BEQ  done
+	CMP  $10, R6
+	BEQ  done
+	SUB  $106, R6, R6            // -42-64 = -106
+	MOVB R6, (R0)
+	ADD  $1, R0
+	ADD  $1, R4                  // 1 dst byte written
+	ADD  $2, R1                  // 2 src bytes consumed (= + escaped)
+	ADD  $2, R5
+	SUB  $2, R2
+	B    simd_loop               // try SIMD again
 
 done:
-	MOVD R4, ret+48(FP)
+	MOVD R4, nDst+48(FP)
+	MOVD R5, nSrc+56(FP)
 	RET

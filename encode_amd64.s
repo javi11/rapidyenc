@@ -1,3 +1,5 @@
+//go:build !goexperiment.simd
+
 #include "textflag.h"
 
 // func encodeFast(dst, src []byte) int

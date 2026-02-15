@@ -234,9 +234,10 @@ func TestDecodeFast(t *testing.T) {
 	}
 	dst := make([]byte, 32)
 
-	n := decodeFast(dst, src)
+	nDst, nSrc := decodeFast(dst, src)
 
-	require.Equal(t, 16, n, "should process all 16 bytes (no specials)")
+	require.Equal(t, 16, nDst, "should write all 16 bytes (no specials)")
+	require.Equal(t, 16, nSrc, "should consume all 16 bytes (no specials)")
 	for i := 0; i < 16; i++ {
 		require.Equal(t, byte('A'), dst[i], "byte %d should be 'A'", i)
 	}
@@ -251,10 +252,11 @@ func TestDecodeFastWithCRLF(t *testing.T) {
 	src[6] = '\n'
 	dst := make([]byte, 32)
 
-	n := decodeFast(dst, src)
+	nDst, nSrc := decodeFast(dst, src)
 
-	// Stops at first special (\r at position 5)
-	require.Equal(t, 5, n, "should stop at \\r position")
+	// Stops at first \r (position 5), processing clean prefix
+	require.Equal(t, 5, nDst, "should write 5 bytes before \\r")
+	require.Equal(t, 5, nSrc, "should consume 5 bytes before \\r")
 	for i := 0; i < 5; i++ {
 		require.Equal(t, byte('A'), dst[i], "byte %d should be 'A'", i)
 	}
@@ -265,10 +267,45 @@ func TestDecodeFastWithEquals(t *testing.T) {
 	for i := range src {
 		src[i] = byte('A') + 42
 	}
+	// Place = at position 8, followed by an escaped byte
 	src[8] = '='
+	src[9] = byte('A') + 42 + 64 // escaped 'A' = 'A'+42+64 = 171
 	dst := make([]byte, 32)
 
-	n := decodeFast(dst, src)
+	nDst, nSrc := decodeFast(dst, src)
 
-	require.Equal(t, 8, n, "should stop at '=' position")
+	// decodeFast now handles = escapes inline
+	// 8 clean bytes + 1 escaped byte = 9 dst, 8 + 2 (= + escaped) = 10 src
+	// Then continues with remaining 6 clean bytes = 15 dst, 16 src total
+	require.Equal(t, 15, nDst, "should decode all bytes including = escape")
+	require.Equal(t, 16, nSrc, "should consume all 16 bytes")
+	for i := 0; i < 8; i++ {
+		require.Equal(t, byte('A'), dst[i], "byte %d should be 'A'", i)
+	}
+	require.Equal(t, byte('A'), dst[8], "escaped byte should decode to 'A'")
+	for i := 9; i < 15; i++ {
+		require.Equal(t, byte('A'), dst[i], "byte %d should be 'A'", i)
+	}
+}
+
+func TestDecodeFastEqualsAtEnd(t *testing.T) {
+	// = at the very last byte — not enough data for escape, should stop
+	src := []byte{byte('A') + 42, byte('A') + 42, '='}
+	dst := make([]byte, 16)
+
+	nDst, nSrc := decodeFast(dst, src)
+
+	require.Equal(t, 2, nDst, "should write 2 clean bytes before =")
+	require.Equal(t, 2, nSrc, "should consume 2 bytes, stop at = (no room for escaped byte)")
+}
+
+func TestDecodeFastEqualsBeforeCRLF(t *testing.T) {
+	// = followed by \r should bail (Go needs to handle \r in state machine)
+	src := []byte{byte('A') + 42, '=', '\r', byte('A') + 42}
+	dst := make([]byte, 16)
+
+	nDst, nSrc := decodeFast(dst, src)
+
+	require.Equal(t, 1, nDst, "should write 1 clean byte, then stop at = before \\r")
+	require.Equal(t, 1, nSrc, "should consume 1 byte, stop at =")
 }
