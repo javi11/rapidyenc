@@ -1,6 +1,6 @@
-module github.com/javi11/rapidyenc
+module github.com/mnightingale/rapidyenc
 
-go 1.26.0
+go 1.24.0
 
 require (
 	github.com/stretchr/testify v1.11.1

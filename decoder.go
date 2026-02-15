@@ -1,5 +1,21 @@
 package rapidyenc
 
+/*
+#include "rapidyenc.h"
+
+// Like `rapidyenc_decode_incremental` but handle the pointer arithmetic
+RapidYencDecoderEnd rapidyenc_decode_incremental_go(const void* src, void* dest, size_t src_length, size_t* n_src, size_t* n_dest, RapidYencDecoderState* state) {
+    const void* in_ptr = src;
+    void* out_ptr = dest;
+
+    RapidYencDecoderEnd ended = rapidyenc_decode_incremental(&in_ptr, &out_ptr, src_length, state);
+    *n_src = (uintptr_t)in_ptr - (uintptr_t)src;
+    *n_dest = (uintptr_t)out_ptr - (uintptr_t)dest;
+
+	return ended;
+}
+*/
+import "C"
 import (
 	"bytes"
 	"encoding/binary"
@@ -10,6 +26,8 @@ import (
 	"hash/crc32"
 	"io"
 	"strconv"
+	"sync"
+	"unsafe"
 )
 
 type Decoder struct {
@@ -32,18 +50,12 @@ type Decoder struct {
 
 	// remainder contains bytes that have been read from r but were not sufficient to copy out via Read
 	remainder []byte
-	// readBuf is a separate buffer for reading from r, avoiding in-place decode
-	// which constrains SIMD optimizations (partial stores corrupt unread src data).
-	readBuf []byte
 }
-
-const defaultReadBufSize = 128 * 1024
 
 func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{
-		r:       r,
-		hash:    crc32.NewIEEE(),
-		readBuf: make([]byte, defaultReadBufSize),
+		r:    r,
+		hash: crc32.NewIEEE(),
 	}
 }
 
@@ -59,35 +71,26 @@ func (d *Decoder) Read(p []byte) (int, error) {
 		return 0, d.metaError()
 	}
 
-	// Read into separate buffer to avoid in-place decode constraints.
-	// This allows SIMD to use partial stores without corrupting unread src data.
-	// We limit the read to len(p) so DecodeIncremental's len(dst) >= len(src) holds.
-	readBuf := d.readBuf
-	readLimit := len(p)
-	if len(readBuf) < readLimit {
-		readBuf = make([]byte, readLimit)
-		d.readBuf = readBuf
+	// Restore previously read data
+	if len(p) < len(d.remainder) {
+		return 0, fmt.Errorf("[rapidyenc] remainder larger than reader: %d < %d", len(p), len(d.remainder))
 	}
-
-	// Restore previously read data into readBuf
-	if readLimit < len(d.remainder) {
-		return 0, fmt.Errorf("[rapidyenc] remainder larger than reader: %d < %d", readLimit, len(d.remainder))
-	}
-	nremainder := copy(readBuf, d.remainder)
+	nremainder := copy(p, d.remainder)
 	d.remainder = d.remainder[nremainder:]
 
+	// Use p as scratch space
 	var n int
-	n, d.err = d.r.Read(readBuf[nremainder:readLimit])
-	src := readBuf[:n+nremainder]
+	n, d.err = d.r.Read(p[nremainder:])
+	p = p[:n+nremainder]
 	dst := p
 
 	var decoded int
 	if d.body && d.format == FormatYenc {
-		nd, ns, err := d.decodeYenc(dst, src)
+		nd, ns, err := d.decodeYenc(dst, p)
 		if err != nil {
 			return nd, err
 		}
-		src = src[ns:]
+		p = p[ns:]
 		dst = dst[nd:]
 		decoded += nd
 	}
@@ -95,11 +98,11 @@ func (d *Decoder) Read(p []byte) (int, error) {
 	// Line by line processing
 	if !d.body {
 		for {
-			line, after, found := bytes.Cut(src, []byte("\r\n"))
+			line, after, found := bytes.Cut(p, []byte("\r\n"))
 			if !found {
 				break
 			}
-			src = after
+			p = after
 
 			if bytes.Equal(line, []byte(".")) {
 				d.err = io.EOF
@@ -113,8 +116,8 @@ func (d *Decoder) Read(p []byte) (int, error) {
 			if d.format == FormatYenc {
 				d.processYenc(line)
 				if d.body {
-					nd, ns, err := d.decodeYenc(dst, src)
-					src = src[ns:]
+					nd, ns, err := d.decodeYenc(dst, p)
+					p = p[ns:]
 					dst = dst[nd:]
 					decoded += nd
 					if err != nil {
@@ -136,7 +139,7 @@ func (d *Decoder) Read(p []byte) (int, error) {
 	}
 
 	// Save remainder; small amount of data that doesn't have \r\n
-	d.remainder = append(d.remainder[:0], src...)
+	d.remainder = append(d.remainder, p...)
 
 	if d.err == io.EOF {
 		return decoded, d.metaError()
@@ -275,12 +278,48 @@ const (
 	FormatUU
 )
 
+// State is the current Decoder State, the values refer to the previously seen
+// characters in the stream, which influence how some sequences need to be handled.
+//
+// The shorthands represent:
+// CR (\r), LF (\n), EQ (=), DT (.)
+type State int
+
+const (
+	StateCRLF     = State(C.RYDEC_STATE_CRLF)
+	StateEQ       = State(C.RYDEC_STATE_EQ)
+	StateCR       = State(C.RYDEC_STATE_CR)
+	StateNone     = State(C.RYDEC_STATE_NONE)
+	StateCRLFDT   = State(C.RYDEC_STATE_CRLFDT)
+	StateCRLFDTCR = State(C.RYDEC_STATE_CRLFDTCR)
+	StateCRLFEQ   = State(C.RYDEC_STATE_CRLFEQ) // may actually be "\r\n.=" in raw Decoder
+)
+
+// End is the State for incremental decoding, whether the end of the yEnc data was reached
+type End int
+
+const (
+	EndNone    = End(C.RYDEC_END_NONE)    // end not reached
+	EndControl = End(C.RYDEC_END_CONTROL) // \r\n=y sequence found, src points to byte after 'y'
+	EndArticle = End(C.RYDEC_END_ARTICLE) // \r\n.\r\n sequence found, src points to byte after last '\n'
+)
+
 var (
 	errDestinationTooSmall = errors.New("destination must be at least the length of source")
 )
 
+var decodeInitOnce sync.Once
+
+func maybeInitDecode() {
+	decodeInitOnce.Do(func() {
+		C.rapidyenc_decode_init()
+	})
+}
+
 // DecodeIncremental stops decoding when a yEnc/NNTP end sequence is found
 func DecodeIncremental(dst, src []byte, state *State) (nDst, nSrc int, end End, err error) {
+	maybeInitDecode()
+
 	if len(src) == 0 {
 		return 0, 0, EndNone, nil
 	}
@@ -289,8 +328,18 @@ func DecodeIncremental(dst, src []byte, state *State) (nDst, nSrc int, end End, 
 		return 0, 0, 0, errDestinationTooSmall
 	}
 
-	nDst, nSrc, end = decodeGeneric(dst, src, state)
-	return nDst, nSrc, end, nil
+	var cnSrc, cnDest C.size_t
+
+	result := End(C.rapidyenc_decode_incremental_go(
+		unsafe.Pointer(&src[0]),
+		unsafe.Pointer(&dst[0]),
+		C.size_t(len(src)),
+		&cnSrc,
+		&cnDest,
+		(*C.RapidYencDecoderState)(unsafe.Pointer(state)),
+	))
+
+	return int(cnDest), int(cnSrc), result, nil
 }
 
 func extractString(data, substr []byte) (string, error) {
