@@ -1,16 +1,25 @@
 # rapidyenc
 
-**rapidyenc** is a high-performance, CGO-powered Go library for decoding [yEnc](https://en.wikipedia.org/wiki/YEnc). It provides fast, memory-efficient decoding with robust error handling, supporting multiple platforms and architectures.
+**rapidyenc** is a high-performance, **pure Go** library for encoding and decoding [yEnc](https://en.wikipedia.org/wiki/YEnc). It provides fast, memory-efficient encoding/decoding with robust error handling, supporting multiple platforms and architectures.
 
-The module exposes the highly efficient encoding and decoding implementations provided by the C compatible library [animetosho/rapidyenc](https://github.com/animetosho/rapidyenc) taking advantage CPU features.
+## 🎯 CGo Removed - Pure Go + SIMD
+
+This fork has **completely removed CGo dependencies**, replacing them with:
+- **Pure Go implementation** for portability and easier cross-compilation
+- **Hand-optimized SIMD assembly** (ARM64 NEON / AMD64 SSE2) for maximum performance
+- **Zero external dependencies** (except testing utilities)
+- **Simpler build process** - no C compiler required!
+
+The implementation leverages native Go code with architecture-specific SIMD optimizations, achieving ~3.4 GB/s throughput (59% of CGo performance) while maintaining Go's portability benefits and eliminating C compiler dependencies.
 
 ## Features
 
-- **Fast yEnc encoding/decoding** using native C implementation via CGO.
-- **Streaming interface** for efficient handling of large files.
+- **Fast yEnc encoding/decoding** using pure Go + SIMD assembly (ARM64 NEON, AMD64 SSE2)
+- **No CGo required** - pure Go implementation with native SIMD optimizations
+- **Streaming interface** for efficient handling of large files
 - **Cross-platform:** Supports Linux, Windows, macOS on `amd64` and `arm64`
-- **Header parsing:** Extracts yEnc `Meta` (filename, size, CRC32, etc).
-- **Error detection:** CRC mismatch, data corruption, and missing headers.
+- **Header parsing:** Extracts yEnc `Meta` (filename, size, CRC32, etc)
+- **Error detection:** CRC mismatch, data corruption, and missing headers
 
 ## Usage Examples
 
@@ -56,17 +65,57 @@ n, err := io.Copy(output, dec) // Copy decoded data to output
 // if err == nil then dec.Meta contains yEnc headers
 ```
 
+## Benchmarks
+
+Performance comparison between the pure Go + SIMD implementation (this branch) vs the `cgo-baseline` branch (CGo-based):
+
+### Decoding Performance (1MB random data)
+
+| Implementation | ns/op | MB/s | Memory | Allocs | Relative |
+|---------------|-------|------|--------|--------|----------|
+| CGo baseline branch (ARM64 M4) | **180,880** | **~5,800 MB/s** | 272 B | 10 allocs/op | **1.00x** (baseline) |
+| **Pure Go + SIMD** (ARM64 M4) | 307,300 | ~3,410 MB/s | 280 B | 11 allocs/op | **0.59x** |
+
+*Benchmark run on Apple M4 (darwin/arm64) with Go 1.24.0*
+
+**Trade-offs:**
+- ✅ **Pure Go advantages**: No C compiler required, easier cross-compilation, simpler build process, better portability
+- ⚠️ **Performance**: CGo version is ~1.7x faster, but pure Go still achieves respectable ~3.4 GB/s throughput
+- ⚡ **Use case**: Pure Go version is ideal when build simplicity and portability outweigh the performance difference
+
+**Performance Profile** (ARM64 M4, 1MB decode):
+- `decodeFast` (SIMD assembly): **46%** - NEON SIMD inner loop (subtract 42, 16-byte chunks)
+- `crc32.ieeeUpdate`: **28%** - Hardware-accelerated CRC32 calculation
+- `decodeGeneric` (Go loop): **15%** - State machine for `\r\n` / escape handling
+- `memmove`: **9%** - Buffer transfers via `io.Copy`
+
+**Key Optimizations:**
+- SIMD processing of 16-byte chunks per iteration (ARM64 NEON / AMD64 SSE2)
+- Hardware-accelerated CRC32 calculation
+- Efficient state machine for special character handling
+- Zero-copy operations where possible
+
+Run benchmarks yourself:
+```bash
+# Benchmark current implementation (pure Go + SIMD)
+go test -bench=BenchmarkDecoder -benchmem
+
+# Compare with CGo baseline
+git checkout cgo-baseline
+go test -bench=BenchmarkDecoder -benchmem
+```
+
 ## Building from Source
 
-It may not be desirable to use the included binary blobs, I could not find a way of avoiding it as there didn't appear to be a way to pass per-file CFLAGS when using CGO. If things have changed or there is a better way please let me know.
+Building is straightforward with no C compiler required:
 
-See [Makefile](Makefile) and [build.yml](.github/workflows/build.yml) for how the blobs are compiled.
+```bash
+go build
+```
 
-Adding support for other platforms involves creating a `toolchain-*.cmake` file, adjust [Makefile](Makefile), compile and update [cgo.go](cgo.go)
-
-### CGO
-
-Unfortunate for portability reasons, for now unavoidable but there are some [interesting things happening with SIMD](https://ithub.com/golang/go/issues/73787) that give hope for the possibility of a pure Go version in the future.
+The package includes hand-optimized assembly for:
+- ARM64: `decode_arm64.s`, `encode_arm64.s` (NEON SIMD)
+- AMD64: `decode_amd64.s`, `encode_amd64.s` (SSE2 SIMD)
 
 ## Contributing
 
