@@ -1,4 +1,4 @@
-module github.com/mnightingale/rapidyenc
+module github.com/javi11/rapidyenc
 
 go 1.24.0
 
