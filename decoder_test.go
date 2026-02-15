@@ -226,3 +226,49 @@ func TestExtractCRC(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeFast(t *testing.T) {
+	src := make([]byte, 16)
+	for i := range src {
+		src[i] = byte('A') + 42 // 'k' decodes to 'A'
+	}
+	dst := make([]byte, 32)
+
+	n := decodeFast(dst, src)
+
+	require.Equal(t, 16, n, "should process all 16 bytes (no specials)")
+	for i := 0; i < 16; i++ {
+		require.Equal(t, byte('A'), dst[i], "byte %d should be 'A'", i)
+	}
+}
+
+func TestDecodeFastWithCRLF(t *testing.T) {
+	src := make([]byte, 16)
+	for i := range src {
+		src[i] = byte('A') + 42 // 'k'
+	}
+	src[5] = '\r'
+	src[6] = '\n'
+	dst := make([]byte, 32)
+
+	n := decodeFast(dst, src)
+
+	// Stops at first special (\r at position 5)
+	require.Equal(t, 5, n, "should stop at \\r position")
+	for i := 0; i < 5; i++ {
+		require.Equal(t, byte('A'), dst[i], "byte %d should be 'A'", i)
+	}
+}
+
+func TestDecodeFastWithEquals(t *testing.T) {
+	src := make([]byte, 16)
+	for i := range src {
+		src[i] = byte('A') + 42
+	}
+	src[8] = '='
+	dst := make([]byte, 32)
+
+	n := decodeFast(dst, src)
+
+	require.Equal(t, 8, n, "should stop at '=' position")
+}

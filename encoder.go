@@ -1,9 +1,5 @@
 package rapidyenc
 
-/*
-#include "rapidyenc.h"
-*/
-import "C"
 import (
 	"errors"
 	"fmt"
@@ -11,7 +7,6 @@ import (
 	"hash/crc32"
 	"io"
 	"sync"
-	"unsafe"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -38,8 +33,6 @@ type Encoder struct {
 //
 // It is the caller's responsibility to call Close on the [Encoder] when done.
 func NewEncoder(w io.Writer, m Meta) (e *Encoder, err error) {
-	maybeInitEncode()
-
 	e = new(Encoder)
 	e.lineLength = 128
 	e.hash = crc32.NewIEEE()
@@ -118,22 +111,14 @@ func (e *Encoder) Write(p []byte) (n int, err error) {
 	if len(p) > 0 {
 		e.processed += int64(len(p))
 
-		if grow := maxLength(len(p), e.lineLength) - len(e.buf); grow > 0 {
+		if grow := MaxLength(len(p), e.lineLength) - len(e.buf); grow > 0 {
 			e.buf = append(e.buf, make([]byte, grow)...)
 		}
 
 		buf := e.buf
 
-		colTmp := C.int(e.column)
-		length := C.rapidyenc_encode_ex(
-			C.int(e.lineLength),
-			(*C.int)(unsafe.Pointer(&colTmp)),
-			unsafe.Pointer(&p[0]),
-			unsafe.Pointer(&buf[0]),
-			C.size_t(len(p)),
-			C.int(0),
-		)
-		e.column = int(colTmp)
+		length, newCol := encodeGeneric(e.lineLength, p, buf, e.column)
+		e.column = newCol
 
 		if length > 0 {
 			// If the last character is '\t' or ' ' then if this is the last write it will need escaping.
@@ -189,14 +174,6 @@ func (e *Encoder) Close() error {
 	return nil
 }
 
-var encodeInitOnce sync.Once
-
-func maybeInitEncode() {
-	encodeInitOnce.Do(func() {
-		C.rapidyenc_encode_init()
-	})
-}
-
 // Encode yEnc encodes the src buffer without adding any =y headers
 //
 // Deprecated: use Encoder as an io.WriteCloser which includes yEnc headers
@@ -205,13 +182,19 @@ func Encode(src []byte) ([]byte, error) {
 		return nil, errors.New("empty source")
 	}
 
-	dst := make([]byte, maxLength(len(src), 128))
+	dst := make([]byte, MaxLength(len(src), 128))
 
-	length := C.rapidyenc_encode(
-		unsafe.Pointer(&src[0]),
-		unsafe.Pointer(&dst[0]),
-		C.size_t(len(src)),
-	)
+	length, _ := encodeGeneric(128, src, dst, 0)
+
+	// Escape trailing space/tab for standalone encoding
+	if length > 0 {
+		lc := dst[length-1]
+		if lc == '\t' || lc == ' ' {
+			dst[length-1] = '='
+			dst[length] = lc + 64
+			length++
+		}
+	}
 
 	return dst[:length], nil
 }
@@ -227,19 +210,4 @@ func (e *Encoder) writeHeader() (int, error) {
 		"=ybegin part=%d total=%d line=%d size=%d name=%s\r\n=ypart begin=%d end=%d\r\n",
 		e.m.PartNumber, e.m.TotalParts, e.lineLength, e.m.FileSize, e.m.FileName, e.m.Begin(), e.m.End(),
 	)
-}
-
-// maxLength returns the maximum possible length of yEnc encoded output given the length of the unencoded data and line length.
-// maxLength also includes additional padding needed by the rapidyenc implementation.
-func maxLength(length, lineLength int) int {
-	ret := length * 2 // all characters escaped
-	ret += 2          // allocation for offset and that a newline may occur early
-	ret += 64         // allocation for YMM overflowing
-
-	// add newlines, considering the possibility of all chars escaped
-	if lineLength == 128 {
-		// optimize common case
-		return ret + 2*(length>>6)
-	}
-	return ret + 2*((length*2)/lineLength)
 }
